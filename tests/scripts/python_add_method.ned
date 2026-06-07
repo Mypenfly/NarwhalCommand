@@ -1,0 +1,14 @@
+//!@Open: ./tests/data/python_app.py
+//!@Location:
+    def complete_task(self, task_id: str) -> bool:
+        """Mark a task as completed. Returns False if not found."""
+//!@New:
+    def reopen_task(self, task_id: str) -> bool:
+        """Reopen a previously completed task."""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        task.completed = False
+        return True
+
+//!@Off:Open

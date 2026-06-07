@@ -25,6 +25,8 @@ pub enum Token {
     },
     /// Location 命令：定位代码位置
     Location {
+        /// 是否为 Location:Block（Phase 3）
+        block: bool,
         /// 定位内容的所有行（不含 `//!@` 前缀和 `...` 分隔符）
         lines: Vec<String>,
         /// Token 所在行号
@@ -41,6 +43,8 @@ pub enum Token {
     },
     /// Delete 命令：删除匹配内容
     Delete {
+        /// 是否为 Delete:Block（Phase 3）
+        block: bool,
         /// 匹配内容的所有行（不含 `//!@` 前缀和 `...` 分隔符）
         lines: Vec<String>,
         /// Token 所在行号
@@ -96,12 +100,11 @@ impl Lexer {
             } else if command_part.starts_with("Location:") {
                 let remaining = command_part.strip_prefix("Location:").unwrap_or("");
                 // Location:Block — Block 是修饰符而非内容
-                let content_remaining = if remaining.trim() == "Block" { "" } else { remaining };
-                let content_lines = Self::extract_command_content(
-                    &mut lines,
-                    content_remaining,
-                );
+                let is_block = remaining.trim() == "Block";
+                let content_remaining = if is_block { "" } else { remaining };
+                let content_lines = Self::extract_command_content(&mut lines, content_remaining);
                 tokens.push(Token::Location {
+                    block: is_block,
                     lines: content_lines,
                     line: line_number,
                 });
@@ -138,12 +141,11 @@ impl Lexer {
             } else if command_part.starts_with("Delete:") {
                 let remaining = command_part.strip_prefix("Delete:").unwrap_or("");
                 // Delete:Block — Block 是修饰符而非内容（Phase 3）
-                let content_remaining = if remaining.trim() == "Block" { "" } else { remaining };
-                let content_lines = Self::extract_command_content(
-                    &mut lines,
-                    content_remaining,
-                );
+                let is_block = remaining.trim() == "Block";
+                let content_remaining = if is_block { "" } else { remaining };
+                let content_lines = Self::extract_command_content(&mut lines, content_remaining);
                 tokens.push(Token::Delete {
+                    block: is_block,
                     lines: content_lines,
                     line: line_number,
                 });
@@ -214,11 +216,12 @@ mod tests {
     #[test]
     fn test_token_location_creation() {
         let token = Token::Location {
+            block: false,
             lines: vec!["fn main() {".to_string(), "    let x = 1;".to_string()],
             line: 3,
         };
         match token {
-            Token::Location { lines, line } => {
+            Token::Location { lines, line, .. } => {
                 assert_eq!(lines.len(), 2);
                 assert_eq!(lines[0], "fn main() {");
                 assert_eq!(line, 3);
@@ -307,7 +310,7 @@ fn main() {
         assert_eq!(tokens.len(), 3);
 
         match &tokens[0] {
-            Token::Location { lines, line } => {
+            Token::Location { lines, line, .. } => {
                 assert_eq!(*line, 1);
                 assert_eq!(lines.len(), 2);
                 assert_eq!(lines[0], "fn main() {");
@@ -339,7 +342,7 @@ fn foo() {
         assert_eq!(tokens.len(), 2);
 
         match &tokens[0] {
-            Token::Location { lines, line } => {
+            Token::Location { lines, line, .. } => {
                 assert_eq!(*line, 1);
                 assert_eq!(lines.len(), 2);
                 assert_eq!(lines[0], "fn foo() {");
@@ -370,7 +373,7 @@ fn main() {
         );
 
         match &tokens[1] {
-            Token::Location { lines, line } => {
+            Token::Location { lines, line, .. } => {
                 assert_eq!(*line, 2);
                 assert_eq!(lines.len(), 1);
                 assert_eq!(lines[0], "fn main() {");
@@ -424,7 +427,7 @@ match_me
         );
 
         match &tokens[1] {
-            Token::Location { lines: _, line } => {
+            Token::Location { lines: _, line, .. } => {
                 assert_eq!(*line, 4);
             }
             _ => panic!("Expected Location"),
@@ -458,7 +461,9 @@ match_me
 
         match &tokens[0] {
             Token::New {
-                position, lines, line,
+                position,
+                lines,
+                line,
             } => {
                 assert_eq!(position, "Normal");
                 assert_eq!(*line, 1);
@@ -487,7 +492,9 @@ match_me
 
         match &tokens[0] {
             Token::New {
-                position, lines, line,
+                position,
+                lines,
+                line,
             } => {
                 assert_eq!(position, "Start");
                 assert_eq!(*line, 1);
@@ -508,7 +515,9 @@ match_me
 
         match &tokens[0] {
             Token::New {
-                position, lines, line,
+                position,
+                lines,
+                line,
             } => {
                 assert_eq!(position, "End");
                 assert_eq!(*line, 1);
@@ -578,7 +587,7 @@ let x = 1;
         assert_eq!(tokens.len(), 3);
 
         match &tokens[0] {
-            Token::Delete { lines, line } => {
+            Token::Delete { lines, line, .. } => {
                 assert_eq!(*line, 1);
                 assert_eq!(lines.len(), 1);
                 assert_eq!(lines[0], "let x = 1;");
@@ -647,5 +656,73 @@ let y = 2;
         assert!(matches!(tokens[5], Token::Delete { .. }));
         assert!(matches!(tokens[6], Token::Separator { .. }));
         assert!(matches!(tokens[7], Token::Off { .. }));
+    }
+
+    // ============================================================
+    // Location:Block / Delete:Block Token 测试 (Phase 3)
+    // ============================================================
+
+    #[test]
+    fn test_lexer_location_block_token() {
+        let script = "//!@Location:Block\nfn main() {\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Location { block, lines, line } => {
+                assert!(block, "Location:Block should have block=true");
+                assert_eq!(*line, 1);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0], "fn main() {");
+            }
+            _ => panic!("Expected Location token"),
+        }
+
+        assert_eq!(tokens[1], Token::Separator { line: 3 });
+    }
+
+    #[test]
+    fn test_lexer_delete_block_token() {
+        let script = "//!@Delete:Block\nlet x = 1;\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Delete { block, lines, line } => {
+                assert!(block, "Delete:Block should have block=true");
+                assert_eq!(*line, 1);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0], "let x = 1;");
+            }
+            _ => panic!("Expected Delete token"),
+        }
+
+        assert_eq!(tokens[1], Token::Separator { line: 3 });
+    }
+
+    #[test]
+    fn test_lexer_location_normal_has_block_false() {
+        let script = "//!@Location:\nfn main() {\n...\n";
+        let tokens = Lexer::tokenize(script);
+
+        match &tokens[0] {
+            Token::Location { block, .. } => {
+                assert!(!block, "Normal Location should have block=false");
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_delete_normal_has_block_false() {
+        let script = "//!@Delete:\nlet x = 1;\n...\n";
+        let tokens = Lexer::tokenize(script);
+
+        match &tokens[0] {
+            Token::Delete { block, .. } => {
+                assert!(!block, "Normal Delete should have block=false");
+            }
+            _ => panic!("Expected Delete token"),
+        }
     }
 }

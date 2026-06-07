@@ -60,6 +60,11 @@ pub enum MatchError {
         /// 中间隔了多少行
         gap_lines: usize,
     },
+    /// Block 不可解析（Location:Block 指定了 Block 指令但内容无法解析为代码块）
+    BlockNotParseable {
+        /// 用于定位的内容
+        location_content: String,
+    },
 }
 
 /// 命令解析错误
@@ -84,6 +89,11 @@ pub enum ParseError {
     /// 意外的分隔符
     #[allow(dead_code)]
     UnexpectedSeparator {
+        /// 所在行号
+        line: usize,
+    },
+    /// Delete:Block 要求前一个 Location 也使用 Block 指令（Phase 3）
+    BlockRequiredForDelete {
         /// 所在行号
         line: usize,
     },
@@ -183,6 +193,13 @@ impl fmt::Display for MatchError {
                     gap_lines, location_last_line, delete_first_line
                 )
             }
+            MatchError::BlockNotParseable { location_content } => {
+                write!(
+                    f,
+                    "Location 被指定为一个 Block，但提供内容无法解析为一个 Block，请重新定位：\n{}",
+                    location_content
+                )
+            }
         }
     }
 }
@@ -194,11 +211,7 @@ impl fmt::Display for ParseError {
                 write!(f, "Open 命令缺少文件路径参数")
             }
             ParseError::UnknownCommand { token, line } => {
-                write!(
-                    f,
-                    "第 {} 行出现无法识别的命令: {}",
-                    line, token
-                )
+                write!(f, "第 {} 行出现无法识别的命令: {}", line, token)
             }
             ParseError::MissingLocation { command, line } => {
                 write!(
@@ -210,6 +223,14 @@ impl fmt::Display for ParseError {
             }
             ParseError::UnexpectedSeparator { line } => {
                 write!(f, "第 {} 行出现意外的分隔符 ...", line)
+            }
+            ParseError::BlockRequiredForDelete { line } => {
+                write!(
+                    f,
+                    "第 {} 行: Delete:Block 要求前一个 Location 也使用 Block 指令（Location:Block），\n\
+                     请将前一个 Location 命令改为 Location:Block 或移除 Delete 的 Block 修饰符",
+                    line
+                )
             }
         }
     }
@@ -344,5 +365,15 @@ mod tests {
         let display = format!("{}", err);
         assert!(display.contains("Delete 命令未能在当前 Block 中找到匹配内容"));
         assert!(display.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn test_block_not_parseable_error_display() {
+        let err = MatchError::BlockNotParseable {
+            location_content: "# Title\n## Section".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("无法解析为一个 Block"));
+        assert!(display.contains("# Title"));
     }
 }

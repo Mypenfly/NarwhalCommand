@@ -109,7 +109,8 @@ mod integration_tests {
         let env = TestEnv::new();
 
         // 创建目标文件
-        let target_content = "// header\nfn process() {\n    do_work();\n}\n\nfn main() {\n    process();\n}\n";
+        let target_content =
+            "// header\nfn process() {\n    do_work();\n}\n\nfn main() {\n    process();\n}\n";
         let target_path = env.create_file("sample.rs", target_content);
 
         // 创建 .ned 脚本
@@ -147,10 +148,7 @@ mod integration_tests {
         let target_path = env.create_file("implicit.rs", target_content);
 
         // 脚本无显式 Off:Open，依赖隐式 Off
-        let ned_script = format!(
-            "//!@Open: {}\n//!@Location:\nfn bar() {{}}\n",
-            target_path
-        );
+        let ned_script = format!("//!@Open: {}\n//!@Location:\nfn bar() {{}}\n", target_path);
         let ned_path = env.create_file("test_implicit.ned", &ned_script);
 
         let script_content = std::fs::read_to_string(&ned_path).unwrap();
@@ -160,7 +158,11 @@ mod integration_tests {
         let commands = ScriptParser::parse(tokens).unwrap();
         let mut engine = Engine::new();
         let result = engine.execute(commands);
-        assert!(result.is_ok(), "Implicit Off should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Implicit Off should succeed: {:?}",
+            result.err()
+        );
 
         // 文件内容不变
         let result_content = std::fs::read_to_string(&target_path).unwrap();
@@ -191,12 +193,10 @@ mod integration_tests {
 
     #[test]
     fn test_full_pipeline_open_missing_file() {
-        let tokens = vec![
-            lexer::Token::Open {
-                file_path: "/nonexistent/file.rs".to_string(),
-                line: 1,
-            },
-        ];
+        let tokens = vec![lexer::Token::Open {
+            file_path: "/nonexistent/file.rs".to_string(),
+            line: 1,
+        }];
         let commands = ScriptParser::parse(tokens).unwrap();
         let mut engine = Engine::new();
         let result = engine.execute(commands);

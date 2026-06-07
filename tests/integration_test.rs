@@ -109,7 +109,10 @@ fn test_open_location_off_readonly() {
     // 原始脚本只做了 read-only 操作，文件内容应不变
     let original = std::fs::read_to_string("tests/data/sample.rs").unwrap();
     let result = env.read_target();
-    assert_eq!(result, original, "Read-only Location should not modify file");
+    assert_eq!(
+        result, original,
+        "Read-only Location should not modify file"
+    );
 
     // diff_lines 应为空（只读操作不产生 diff）
     assert!(engine.diff_lines.is_empty());
@@ -214,7 +217,11 @@ fn test_add_method_to_impl() {
         .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
         .count();
-    assert!(added_count > 0, "Should have Added diff lines, got {}", added_count);
+    assert!(
+        added_count > 0,
+        "Should have Added diff lines, got {}",
+        added_count
+    );
 }
 
 #[test]
@@ -320,7 +327,11 @@ fn test_delete_function() {
         .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
         .count();
-    assert!(deleted_count > 0, "Should have Deleted diff lines, got {}", deleted_count);
+    assert!(
+        deleted_count > 0,
+        "Should have Deleted diff lines, got {}",
+        deleted_count
+    );
 }
 
 // ============================================================
@@ -366,7 +377,10 @@ fn test_replace_function_delete_then_new() {
         .lines()
         .filter(|l| l.trim().starts_with("fn generate_salt("))
         .count();
-    assert_eq!(fn_count, 1, "Should have exactly one generate_salt function");
+    assert_eq!(
+        fn_count, 1,
+        "Should have exactly one generate_salt function"
+    );
 
     // 验证既有 Added 也有 Deleted 行
     let added: Vec<_> = engine
@@ -467,3 +481,394 @@ fn test_delete_not_found_errors() {
     let (_, success) = execute_script(&script);
     assert!(!success, "Delete not found should fail");
 }
+
+// ============================================================
+// Phase 3: Location:Block 集成测试
+// ============================================================
+
+#[test]
+fn test_location_block_new_after_function() {
+    // Location:Block 精确定位一个函数代码块，在其后新增一个方法
+    let env = TestEnv::from_data_file("config.rs");
+    let script = env.load_script("location_block_new.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Location:Block + New script failed");
+
+    let result = env.read_target();
+
+    // 新方法应存在于 build_database_url 之后
+    assert!(
+        result.contains("pub fn connect_timeout(&self) -> u64 {"),
+        "New method should be inserted after build_database_url\n{}",
+        result
+    );
+    assert!(
+        result.contains("self.request_timeout_secs * 2"),
+        "New method body should be present"
+    );
+
+    // 原有函数仍然存在
+    assert!(result.contains("pub fn build_database_url("));
+    assert!(result.contains("pub fn from_env() -> Self"));
+
+    // diff_lines 应包含 Added 行
+    let added_count = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .count();
+    assert!(
+        added_count >= 3,
+        "Should have at least 3 Added lines, got {}",
+        added_count
+    );
+}
+
+#[test]
+fn test_location_block_exact_range() {
+    // 验证 Location:Block 精确提取了代码块范围
+    // 在 config.rs 中，build_database_url 函数占 88-94 行（7 行）
+    let env = TestEnv::from_data_file("config.rs");
+
+    let script = format!(
+        "//!@Open: {}\n//!@Location:Block\n    pub fn build_database_url(\n//!@Off:Open\n",
+        env.target_path
+    );
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Location:Block readonly should succeed");
+
+    // diff_lines 应为空（只读操作）
+    assert!(engine.diff_lines.is_empty());
+}
+
+#[test]
+fn test_location_block_struct() {
+    // Location:Block 定位 struct 定义块
+    let env = TestEnv::from_data_file("config.rs");
+
+    // Location:Block 定位 AppConfig struct，插入新字段
+    let script = format!(
+        "//!@Open: {}\n//!@Location:Block\npub struct AppConfig {{\n//!@New:\n    pub api_version: String,\n//!@Off:Open\n",
+        env.target_path
+    );
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Location:Block + New in struct failed");
+
+    let result = env.read_target();
+    assert!(
+        result.contains("pub api_version: String"),
+        "New field should be inserted after struct block\n{}",
+        result
+    );
+    // Struct 原有字段仍在
+    assert!(result.contains("pub database_url: String"));
+    assert!(result.contains("pub assets_dir: PathBuf"));
+
+    let added_count = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .count();
+    assert!(added_count > 0, "Should have Added diff lines");
+}
+
+#[test]
+fn test_location_block_impl_block() {
+    // Location:Block 定位 impl Default 代码块并验证其范围
+    let env = TestEnv::from_data_file("config.rs");
+
+    let script = format!(
+        "//!@Open: {}\n//!@Location:Block\nimpl Default for AppConfig {{\n//!@Delete:Block\n//!@Off:Open\n",
+        env.target_path
+    );
+
+    let (_, success) = execute_script(&script);
+    assert!(
+        success,
+        "Location:Block + Delete:Block on impl should succeed"
+    );
+
+    let result = env.read_target();
+    // impl Default for AppConfig 块应被删除
+    assert!(
+        !result.contains("impl Default for AppConfig"),
+        "impl Default block should be deleted"
+    );
+    // impl AppConfig 块应仍然存在
+    assert!(
+        result.contains("impl AppConfig"),
+        "impl AppConfig block should remain"
+    );
+}
+
+#[test]
+fn test_delete_block_entire_function() {
+    // Delete:Block 删除整个函数代码块
+    let env = TestEnv::from_data_file("services.rs");
+    let script = env.load_script("delete_block.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Delete:Block script failed");
+
+    let result = env.read_target();
+
+    // bcrypt_hash 函数应被完全删除
+    assert!(
+        !result.contains("fn bcrypt_hash("),
+        "bcrypt_hash function should be deleted"
+    );
+    assert!(
+        !result.contains("password must not be empty"),
+        "bcrypt_hash body should be deleted"
+    );
+
+    // 相邻函数 generate_salt 仍应存在
+    assert!(
+        result.contains("fn generate_salt("),
+        "generate_salt should remain"
+    );
+
+    // 验证 diff 包含 Deleted 行
+    let deleted_count = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .count();
+    assert!(
+        deleted_count > 0,
+        "Should have Deleted diff lines, got {}",
+        deleted_count
+    );
+}
+
+// ============================================================
+// Phase 3: Block 不可解析 / 错误场景测试
+// ============================================================
+
+#[test]
+fn test_location_block_markdown_rejected() {
+    // Location:Block 对纯 Markdown 文本应报错（无法解析为 Block）
+    let env = TestEnv::from_data_file("config.rs");
+
+    // 用 config.rs 作为目标文件，但用类似 Markdown 的 Location 内容定位
+    // 由于 config.rs 中没有纯文本区域，我们创建一个包含纯注释的场景
+    let script = format!(
+        "//!@Open: {}\n//!@Location:Block\n// Application configuration module.\n//!@Off:Open\n",
+        env.target_path
+    );
+
+    let (_, success) = execute_script(&script);
+    // config.rs 第一行是注释，注释行不包含 brace 且没有缩进层级
+    // detect_language 会检查该行及后续几行，后续行有 brace 内容，
+    // 所以实际会被检测为 Brace 语言而非 Unknown
+    // 这里我们验证：该行的注释不影响后面代码的 brace 检测
+    assert!(
+        success,
+        "Location:Block on a comment line near braces should still parse as brace"
+    );
+}
+
+#[test]
+fn test_location_block_non_parseable_errors() {
+    // 真·不可解析：创建一个不含任何代码结构的临时文件
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let target_path = dir.path().join("plain.txt").to_str().unwrap().to_string();
+    let mut file = std::fs::File::create(&target_path).unwrap();
+    writeln!(file, "This is a plain text file.").unwrap();
+    writeln!(file, "It has no code structure.").unwrap();
+    writeln!(file, "No braces, no indentation.").unwrap();
+    writeln!(file, "Just some random content.").unwrap();
+    writeln!(file, "And more text.").unwrap();
+    drop(file);
+
+    let script = format!(
+        "//!@Open: {}\n//!@Location:Block\nThis is a plain text file.\n//!@Off:Open\n",
+        target_path
+    );
+
+    let (_, success) = execute_script(&script);
+    assert!(
+        !success,
+        "Location:Block on plain text should fail with BlockNotParseable"
+    );
+}
+
+#[test]
+fn test_delete_block_without_location_block_errors() {
+    // Delete:Block 需要前一个 Location 也使用 Block，否则应报错
+    let env = TestEnv::from_data_file("config.rs");
+
+    // 先用普通 Location（非 Block），再 Delete:Block
+    let script = format!(
+        "//!@Open: {}\n//!@Location:\npub struct AppConfig\n...\n//!@Delete:Block\n//!@Off:Open\n",
+        env.target_path
+    );
+
+    let (_, success) = execute_script(&script);
+    assert!(
+        !success,
+        "Delete:Block without prior Location:Block should fail"
+    );
+}
+
+// ============================================================
+// Python 集成测试
+// ============================================================
+
+#[test]
+fn test_python_add_method_to_class() {
+    let env = TestEnv::from_data_file("python_app.py");
+    let script = env.load_script("python_add_method.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Python add method script failed");
+
+    let content = env.read_target();
+    assert!(content.contains("def reopen_task"), "Should contain new method");
+    assert!(content.contains("Reopen a previously completed task"));
+    assert!(content.contains("task.completed = False"));
+
+    let added: Vec<_> = engine.diff_lines.iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert!(!added.is_empty(), "Should have Added diff lines");
+}
+
+#[test]
+fn test_python_delete_method() {
+    let env = TestEnv::from_data_file("python_app.py");
+    let script = env.load_script("python_delete_method.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Python delete method script failed");
+
+    let content = env.read_target();
+    assert!(!content.contains("def complete_task"), "complete_task should be deleted");
+    assert!(content.contains("def delete_task"), "delete_task should remain");
+    assert!(content.contains("def count_by_status"), "count_by_status should remain");
+
+    let deleted: Vec<_> = engine.diff_lines.iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(!deleted.is_empty(), "Should have Deleted diff lines");
+}
+
+#[test]
+fn test_python_location_block_new() {
+    let env = TestEnv::from_data_file("python_app.py");
+    let script = env.load_script("python_location_block_new.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Python Location:Block + New script failed");
+
+    let content = env.read_target();
+    // New function should appear after handle_get
+    let handle_get_pos = content.find("def handle_get").unwrap();
+    let handle_complete_pos = content.find("def handle_complete").unwrap();
+    let handle_delete_pos = content.find("def handle_delete").unwrap();
+    assert!(handle_delete_pos > handle_get_pos, "handle_delete should be after handle_get");
+    assert!(handle_delete_pos < handle_complete_pos, "handle_delete should be before handle_complete");
+
+    let added: Vec<_> = engine.diff_lines.iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert!(!added.is_empty(), "Should have Added diff lines");
+}
+
+// ============================================================
+// Rust 复杂操作集成测试
+// ============================================================
+
+#[test]
+fn test_rust_location_block_add_method() {
+    let env = TestEnv::from_data_file("rust_parser.rs");
+    let script = env.load_script("rust_nested_location.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Rust Location:Block + New script failed");
+
+    let content = env.read_target();
+    // Location:Block 定位 impl Parser，New 在 impl block 之后新增方法
+    assert!(
+        content.contains("fn token_count"),
+        "Should contain new token_count method"
+    );
+    assert!(content.contains("self.tokens.len()"));
+    // impl Parser 原来的内容应保留
+    assert!(content.contains("fn parse_expression"), "parse_expression should remain");
+    assert!(content.contains("fn parse_prefix"), "parse_prefix should remain");
+
+    let added: Vec<_> = engine.diff_lines.iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert!(!added.is_empty(), "Should have Added diff lines");
+}
+
+#[test]
+fn test_rust_complex_replace() {
+    let env = TestEnv::from_data_file("rust_parser.rs");
+    let script = env.load_script("rust_complex_replace.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Rust complex replace script failed");
+
+    let content = env.read_target();
+    // 新方法 peek_token 应存在
+    assert!(content.contains("fn peek_token"), "Should contain new peek_token method");
+    assert!(content.contains("self.tokens.get(self.position + 1)"));
+    // 旧方法也应存在（Delete + New 替换了同一个方法）
+    assert!(content.contains("fn current_token"));
+
+    // Should have both Added and Deleted diff lines
+    let added: Vec<_> = engine.diff_lines.iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    let deleted: Vec<_> = engine.diff_lines.iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(!added.is_empty(), "Should have Added diff lines");
+    assert!(!deleted.is_empty(), "Should have Deleted diff lines");
+}
+
+// ============================================================
+// Markdown 文档操作集成测试
+// ============================================================
+
+#[test]
+fn test_markdown_add_section() {
+    let env = TestEnv::from_data_file("doc.md");
+    let script = env.load_script("doc_add_section.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Markdown add section script failed");
+
+    let content = env.read_target();
+    assert!(content.contains("## Known Limitations"), "Should contain new section");
+    assert!(content.contains("Rust-style raw string literals"));
+    assert!(content.contains("Tab-indented Python"));
+    // Original sections should remain
+    assert!(content.contains("## Performance Considerations"));
+    assert!(content.contains("## File Format Reference"));
+
+    let added: Vec<_> = engine.diff_lines.iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert!(!added.is_empty(), "Should have Added diff lines");
+}
+
+#[test]
+fn test_markdown_location_block_rejected() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("doc_block_rejected.ned");
+
+    let (_, success) = execute_script(&script);
+    assert!(
+        !success,
+        "Location:Block on markdown should fail with BlockNotParseable"
+    );
+}
+

@@ -12,8 +12,9 @@
 //!
 //! 详见 INSTRUCTION.md 第 3.1 节 "Location 匹配算法"
 
+use crate::block::BlockParser;
 use crate::error::MatchError;
-use crate::model::{self, ContentBlock, FileContent, Line, LocationContent};
+use crate::model::{self, ContentBlock, FileContent, Line, LocationContent, MatchInfo};
 
 /// Location 匹配器
 ///
@@ -26,10 +27,14 @@ impl LocationMatcher {
     /// 匹配过程：
     /// 1. 首行去空白匹配 → 收集候选起点
     /// 2. 逐行比对（content 去空白 + diff_taps）→ 筛选
-    /// 3. 确认唯一性 → 返回 ContentBlock（当前 Phase 1: 从首行到文件末尾）
+    /// 3. 确认唯一性 → 返回 ContentBlock
+    ///
+    /// 若 `block` 为 true（Location:Block），使用 BlockParser 获取精确 Block 边界，
+    /// 而非"从首行到文件末尾"的默认行为。
     pub fn find_unique_block(
         file: &FileContent,
         location: &LocationContent,
+        block: bool,
     ) -> Result<ContentBlock, MatchError> {
         if location.lines.is_empty() {
             // 空 Location — 使用整个搜索范围作为 ContentBlock
@@ -48,13 +53,14 @@ impl LocationMatcher {
                 .collect();
             return Ok(ContentBlock {
                 start_line: 1,
+                end_line: file.lines.len(),
                 lines,
-                matched_line_count: 0,
+                match_info: MatchInfo::Empty,
             });
         }
         let candidates = collect_first_line_matches(file, location);
         let filtered = filter_by_full_match(file, candidates, location);
-        expect_single_match(file, filtered, location)
+        expect_single_match(file, filtered, location, block)
     }
 }
 
@@ -62,10 +68,7 @@ impl LocationMatcher {
 ///
 /// 使用 FileContent 的 first_line_index 进行 O(1) 查找，
 /// 避免每次匹配都全量扫描文件行。
-fn collect_first_line_matches(
-    file: &FileContent,
-    location: &LocationContent,
-) -> Vec<usize> {
+fn collect_first_line_matches(file: &FileContent, location: &LocationContent) -> Vec<usize> {
     let target = model::stripped_content(&location.lines[0].content);
     file.first_line_index
         .get(&target)
@@ -86,11 +89,7 @@ fn filter_by_full_match(
 }
 
 /// 逐行比对：content（去空白）+ diff_taps 双重校验
-fn rows_match(
-    file: &FileContent,
-    start_index: usize,
-    location: &LocationContent,
-) -> bool {
+fn rows_match(file: &FileContent, start_index: usize, location: &LocationContent) -> bool {
     let loc_lines = &location.lines;
     let location_line_count = loc_lines.len();
 
@@ -156,15 +155,13 @@ fn expect_single_match(
     file: &FileContent,
     candidates: Vec<usize>,
     location: &LocationContent,
+    block: bool,
 ) -> Result<ContentBlock, MatchError> {
     match candidates.len() {
         0 => Err(MatchError::NoMatch {
             location_content: format_location_for_error(location),
         }),
-        1 => {
-            let block = build_content_block(file, candidates[0], location.lines.len());
-            Ok(block)
-        }
+        1 => build_content_block(file, candidates[0], location.lines.len(), block),
         n => {
             let candidate_descriptions: Vec<String> = candidates
                 .iter()
@@ -191,15 +188,24 @@ fn expect_single_match(
 
 /// 从匹配起点构建 ContentBlock
 ///
-/// Phase 1: block 边界为从 start_index 到文件末尾。
-/// matched_line_count 记录 Location 匹配到的行数。
+/// 若 `block` 为 false（普通 Location）：block 边界为从 start_index 到文件末尾。
+/// 若 `block` 为 true（Location:Block）：使用 BlockParser 获取精确的代码块边界。
 fn build_content_block(
     file: &FileContent,
     start_index: usize,
     matched_line_count: usize,
-) -> ContentBlock {
-    let start_line = start_index + 1;
-    let lines: Vec<Line> = file.lines[start_index..]
+    block: bool,
+) -> Result<ContentBlock, MatchError> {
+    let (block_start, block_end) = if block {
+        // Phase 3: 使用 BlockParser 获取精确 Block 边界
+        BlockParser::parse_block(file, start_index)?
+    } else {
+        (start_index, file.lines.len() - 1)
+    };
+
+    let start_line = block_start + 1;
+    let end_line = block_end + 1;
+    let lines: Vec<Line> = file.lines[block_start..=block_end]
         .iter()
         .map(|line| Line {
             line_num: line.line_num,
@@ -210,7 +216,28 @@ fn build_content_block(
         })
         .collect();
 
-    ContentBlock { start_line, lines, matched_line_count }
+    // Location:Block 时应以整个 Block 的行数为匹配行数，
+    // 这样 New:Normal 会插入到 Block 之后而非 Block 内部
+    let effective_matched = if block {
+        lines.len()
+    } else {
+        matched_line_count
+    };
+
+    let match_info = if effective_matched == 0 {
+        MatchInfo::Empty
+    } else {
+        MatchInfo::Location {
+            matched_line_count: effective_matched,
+        }
+    };
+
+    Ok(ContentBlock {
+        start_line,
+        end_line,
+        lines,
+        match_info,
+    })
 }
 
 /// 将 LocationContent 格式化为错误信息中的字符串
@@ -291,7 +318,7 @@ mod tests {
 
         let location = make_location_content(&["fn main() {", "    let x = 1;"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_ok());
         let block = result.unwrap();
         assert_eq!(block.start_line, 2);
@@ -302,15 +329,11 @@ mod tests {
 
     #[test]
     fn test_find_unique_block_single_line_location() {
-        let file = make_file_content(&[
-            "fn foo() {}",
-            "fn bar() {}",
-            "fn baz() {}",
-        ]);
+        let file = make_file_content(&["fn foo() {}", "fn bar() {}", "fn baz() {}"]);
 
         let location = make_location_content(&["fn bar() {}"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_ok());
         let block = result.unwrap();
         assert_eq!(block.start_line, 2);
@@ -319,14 +342,11 @@ mod tests {
 
     #[test]
     fn test_find_unique_block_no_match() {
-        let file = make_file_content(&[
-            "fn foo() {}",
-            "fn bar() {}",
-        ]);
+        let file = make_file_content(&["fn foo() {}", "fn bar() {}"]);
 
         let location = make_location_content(&["fn nonexistent() {}"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_err());
         match result.unwrap_err() {
             MatchError::NoMatch { .. } => {} // expected
@@ -348,7 +368,7 @@ mod tests {
 
         let location = make_location_content(&["fn foo() {"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_err());
         match result.unwrap_err() {
             MatchError::TooManyMatches { count, .. } => {
@@ -373,7 +393,7 @@ mod tests {
 
         let location = make_location_content(&["fn main() {", "    let x = 1;"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_ok());
         let block = result.unwrap();
         assert_eq!(block.start_line, 2);
@@ -393,7 +413,7 @@ mod tests {
 
         let location = make_location_content(&["fn foo() {", "    let b = 2;"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_ok());
         let block = result.unwrap();
         assert_eq!(block.start_line, 5);
@@ -420,7 +440,7 @@ mod tests {
 
         let location = make_location_content(&["fn process() {"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_ok());
         let block = result.unwrap();
         assert_eq!(block.start_line, 4);
@@ -433,16 +453,11 @@ mod tests {
 
     #[test]
     fn test_find_unique_block_skips_empty_lines_in_location() {
-        let file = make_file_content(&[
-            "fn main() {",
-            "",
-            "    let x = 1;",
-            "}",
-        ]);
+        let file = make_file_content(&["fn main() {", "", "    let x = 1;", "}"]);
 
         let location = make_location_content(&["fn main() {", "", "    let x = 1;"]);
 
-        let result = LocationMatcher::find_unique_block(&file, &location);
+        let result = LocationMatcher::find_unique_block(&file, &location, false);
         assert!(result.is_ok());
         let block = result.unwrap();
         assert_eq!(block.start_line, 1);

@@ -1,0 +1,14 @@
+//!@Open: ./tests/data/python_app.py
+//!@Location:
+    def complete_task(self, task_id: str) -> bool:
+        """Mark a task as completed. Returns False if not found."""
+//!@Delete:
+    def complete_task(self, task_id: str) -> bool:
+        """Mark a task as completed. Returns False if not found."""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        task.mark_completed()
+        return True
+
+//!@Off:Open

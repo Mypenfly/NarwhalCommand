@@ -167,7 +167,7 @@ cargo run -- test_new_delete.ned   # 执行成功，输出带 + / - 的 diff
 
 ## Phase 3: Location:Block + Delete:Block
 
-**目标**：代码块精确识别（花括号 / 缩进），支持整块增删。
+**目标**：代码块精确识别（花括号 / 缩进/类似lsp的精确识别），支持整块增删。
 
 > **当前状态**：Lexer 已处理 `Location:Block` / `Delete:Block` 修饰符（不泄漏为内容），
 > 但 BlockParser 和对应的执行逻辑尚未实现。

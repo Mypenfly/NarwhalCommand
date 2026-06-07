@@ -101,15 +101,30 @@ pub struct FirstMatchContent {
     pub lines: Vec<MatchLine>,
 }
 
+/// 定位信息的来源
+///
+/// 用于确定 New:Normal 的插入位置。
+#[derive(Debug, PartialEq)]
+pub enum MatchInfo {
+    /// 空 Location（无匹配内容），New 插入到 Block 末尾
+    Empty,
+    /// Location 匹配到的行数，New 插入到匹配行之后
+    Location { matched_line_count: usize },
+    /// Delete 操作后记录的删除起始位置，New 插入到此位置替换
+    DeleteAt { position: usize },
+}
+
 /// 一个代码块（可能为整个文件、一个方法、一个循环体等）
 #[derive(Debug, PartialEq)]
 pub struct ContentBlock {
-    /// Block 在文件中的起始行号
+    /// Block 在文件中的起始行号（1-based）
     pub start_line: usize,
+    /// Block 在文件中的结束行号（1-based），用于精确替换
+    pub end_line: usize,
     /// Block 内包含的所有行
     pub lines: Vec<Line>,
-    /// Location 匹配到的行数（用于确定 New 插入位置）
-    pub matched_line_count: usize,
+    /// 定位信息来源，用于确定 New:Normal 的插入位置
+    pub match_info: MatchInfo,
 }
 
 /// Open 命令解析文件后得到的完整文件内容
@@ -179,12 +194,11 @@ impl FileContent {
     /// 预计算 stripped_content，构建首行哈希索引。
     /// diff_taps 暂设为 0（Phase 3 再精确计算）。
     pub fn from_path(path: &str) -> Result<Self, crate::error::FileError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            crate::error::FileError::CannotOpen {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| crate::error::FileError::CannotOpen {
                 path: path.to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
 
         let mut lines: Vec<Line> = Vec::new();
         let mut first_line_index: HashMap<String, Vec<usize>> = HashMap::new();
@@ -207,7 +221,10 @@ impl FileContent {
             });
         }
 
-        Ok(FileContent { lines, first_line_index })
+        Ok(FileContent {
+            lines,
+            first_line_index,
+        })
     }
 
     /// 将 FileContent 按行写回文件
@@ -222,11 +239,9 @@ impl FileContent {
             .join("\n");
         let content = content + "\n";
 
-        std::fs::write(path, content).map_err(|e| {
-            crate::error::FileError::WriteFailed {
-                path: path.to_string(),
-                reason: e.to_string(),
-            }
+        std::fs::write(path, content).map_err(|e| crate::error::FileError::WriteFailed {
+            path: path.to_string(),
+            reason: e.to_string(),
         })
     }
 }
@@ -318,14 +333,12 @@ mod tests {
     #[test]
     fn test_location_content_stripped_first_line() {
         let loc = LocationContent {
-            lines: vec![
-                LocationLine {
-                    index: 0,
-                    diff_taps: Some(0),
-                    content: "    fn main() {".to_string(),
-                    line_num: None,
-                },
-            ],
+            lines: vec![LocationLine {
+                index: 0,
+                diff_taps: Some(0),
+                content: "    fn main() {".to_string(),
+                line_num: None,
+            }],
         };
         assert_eq!(stripped_content(&loc.lines[0].content), "fnmain(){");
     }
@@ -404,7 +417,10 @@ mod tests {
     fn test_content_block_creation() {
         let block = ContentBlock {
             start_line: 5,
-            matched_line_count: 2,
+            end_line: 0,
+            match_info: MatchInfo::Location {
+                matched_line_count: 2,
+            },
             lines: vec![
                 Line {
                     line_num: 5,
@@ -632,7 +648,10 @@ mod tests {
     fn test_content_block_reindex_updates_line_numbers() {
         let mut block = ContentBlock {
             start_line: 5,
-            matched_line_count: 1,
+            end_line: 0,
+            match_info: MatchInfo::Location {
+                matched_line_count: 1,
+            },
             lines: vec![
                 Line {
                     line_num: 5,
@@ -661,7 +680,8 @@ mod tests {
     fn test_content_block_reindex_empty_block() {
         let mut block = ContentBlock {
             start_line: 1,
-            matched_line_count: 0,
+            end_line: 0,
+            match_info: MatchInfo::Empty,
             lines: vec![],
         };
         block.reindex();

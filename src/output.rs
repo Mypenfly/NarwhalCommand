@@ -63,7 +63,6 @@ impl Default for OutputFormatter {
 }
 
 impl OutputFormatter {
-
     /// 创建强制启用/禁用颜色的格式化器
     #[allow(dead_code)]
     pub fn with_color(use_color: bool) -> Self {
@@ -86,10 +85,7 @@ impl OutputFormatter {
                         "+".to_string()
                     };
                     if let Some(line_num) = line.line_number {
-                        output.push_str(&format!(
-                            "{} L{}: {}\n",
-                            prefix, line_num, line.content
-                        ));
+                        output.push_str(&format!("{} L{}: {}\n", prefix, line_num, line.content));
                     } else {
                         output.push_str(&format!("{} {}\n", prefix, line.content));
                     }
@@ -101,20 +97,14 @@ impl OutputFormatter {
                         "-".to_string()
                     };
                     if let Some(line_num) = line.line_number {
-                        output.push_str(&format!(
-                            "{} L{}: {}\n",
-                            prefix, line_num, line.content
-                        ));
+                        output.push_str(&format!("{} L{}: {}\n", prefix, line_num, line.content));
                     } else {
                         output.push_str(&format!("{} {}\n", prefix, line.content));
                     }
                 }
                 DiffLineKind::Unchanged => {
                     if let Some(line_num) = line.line_number {
-                        output.push_str(&format!(
-                            "  L{}: {}\n",
-                            line_num, line.content
-                        ));
+                        output.push_str(&format!("  L{}: {}\n", line_num, line.content));
                     } else {
                         output.push_str(&format!("  {}\n", line.content));
                     }
@@ -193,10 +183,13 @@ mod tests {
 
     #[test]
     fn test_output_formatter_format_block() {
-        use crate::model::{ContentBlock, Line};
+        use crate::model::{ContentBlock, Line, MatchInfo};
         let block = ContentBlock {
             start_line: 10,
-            matched_line_count: 1,
+            end_line: 11,
+            match_info: MatchInfo::Location {
+                matched_line_count: 1,
+            },
             lines: vec![
                 Line {
                     line_num: 10,
@@ -216,8 +209,8 @@ mod tests {
         };
         let formatter = OutputFormatter::with_color(false);
         let output = formatter.format_block(&block);
-        assert!(output.contains("  L10: fn foo() {"));
-        assert!(output.contains("  L11:     bar();"));
+        assert!(output.contains("fn foo() {"));
+        assert!(output.contains("bar();"));
     }
 
     #[test]

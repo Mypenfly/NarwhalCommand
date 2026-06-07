@@ -14,9 +14,7 @@
 
 use crate::error::ParseError;
 use crate::lexer::Token;
-use crate::model::{
-    DeleteContent, DeleteLine, LocationContent, LocationLine, NewContent, NewLine,
-};
+use crate::model::{DeleteContent, DeleteLine, LocationContent, LocationLine, NewContent, NewLine};
 
 /// 一条完整的命令语句（AST 节点）
 #[derive(Debug, PartialEq)]
@@ -89,32 +87,37 @@ impl Parser {
     pub fn parse(tokens: Vec<Token>) -> Result<Vec<Command>, ParseError> {
         let mut commands: Vec<Command> = Vec::new();
         let mut last_was_location = false;
+        // Phase 3: 追踪上一个 Location 是否使用了 Block 指令
+        let mut last_location_was_block = false;
 
         for token in tokens {
             match token {
-                Token::Open {
-                    file_path, line: _,
-                } => {
+                Token::Open { file_path, line: _ } => {
                     if file_path.is_empty() {
                         return Err(ParseError::MissingFilePath);
                     }
                     commands.push(Command::Open { file_path });
                     last_was_location = false;
+                    last_location_was_block = false;
                 }
                 Token::Location {
-                    lines, line: _,
+                    block,
+                    lines,
+                    line: _,
                 } => {
                     let location_content = build_location_content(lines);
                     commands.push(Command::Location {
-                        block: false,
+                        block,
                         content: location_content,
                     });
                     last_was_location = true;
+                    last_location_was_block = block;
                 }
                 Token::Separator { .. } => {
                     // `...` 分隔符重置 Location 追踪状态：
                     // 后续的 New/Delete 再也不知道在何处操作
                     last_was_location = false;
+                    last_location_was_block = false;
                 }
                 Token::New {
                     position,
@@ -146,18 +149,20 @@ impl Parser {
                         content: new_content,
                     });
                 }
-                Token::Delete {
-                    lines, line,
-                } => {
+                Token::Delete { block, lines, line } => {
                     if !last_was_location {
                         return Err(ParseError::MissingLocation {
                             command: "Delete".to_string(),
                             line,
                         });
                     }
+                    // Phase 3 语法校验：Delete:Block 要求前一个 Location 也使用 Block
+                    if block && !last_location_was_block {
+                        return Err(ParseError::BlockRequiredForDelete { line });
+                    }
                     let delete_content = build_delete_content(lines);
                     commands.push(Command::Delete {
-                        block: false,
+                        block,
                         content: Some(delete_content),
                     });
                 }
@@ -173,9 +178,7 @@ impl Parser {
                             });
                         }
                     };
-                    commands.push(Command::Off {
-                        target: off_target,
-                    });
+                    commands.push(Command::Off { target: off_target });
                 }
             }
         }
@@ -263,10 +266,10 @@ mod tests {
 
     #[test]
     fn test_command_open_creation() {
-        let cmd = Command::Open {
+        let command = Command::Open {
             file_path: "./test.rs".to_string(),
         };
-        match cmd {
+        match command {
             Command::Open { file_path } => assert_eq!(file_path, "./test.rs"),
             _ => panic!("Expected Open command"),
         }
@@ -282,11 +285,11 @@ mod tests {
                 line_num: None,
             }],
         };
-        let cmd = Command::Location {
+        let command = Command::Location {
             block: false,
             content,
         };
-        match cmd {
+        match command {
             Command::Location { block, content } => {
                 assert!(!block);
                 assert_eq!(content.lines.len(), 1);
@@ -297,10 +300,10 @@ mod tests {
 
     #[test]
     fn test_command_off_creation() {
-        let cmd = Command::Off {
+        let command = Command::Off {
             target: OffTarget::Open,
         };
-        match cmd {
+        match command {
             Command::Off { target } => assert_eq!(target, OffTarget::Open),
             _ => panic!("Expected Off command"),
         }
@@ -361,6 +364,7 @@ mod tests {
     #[test]
     fn test_parse_location_with_content() {
         let tokens = vec![Token::Location {
+            block: false,
             lines: vec!["fn main() {".to_string(), "    let x = 1;".to_string()],
             line: 2,
         }];
@@ -381,6 +385,7 @@ mod tests {
     #[test]
     fn test_parse_location_calculates_diff_taps() {
         let tokens = vec![Token::Location {
+            block: false,
             lines: vec![
                 "fn main() {".to_string(),
                 "    let x = 1;".to_string(),
@@ -402,6 +407,7 @@ mod tests {
     #[test]
     fn test_parse_location_diff_taps_relative_to_first_line() {
         let tokens = vec![Token::Location {
+            block: false,
             lines: vec![
                 "        deep indent".to_string(),
                 "    less indent".to_string(),
@@ -428,6 +434,7 @@ mod tests {
                 line: 1,
             },
             Token::Location {
+                block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: 2,
             },
@@ -487,6 +494,7 @@ mod tests {
     fn test_parse_new_normal() {
         let tokens = vec![
             Token::Location {
+                block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: 2,
             },
@@ -551,6 +559,7 @@ mod tests {
     fn test_parse_new_content_calculates_diff_taps() {
         let tokens = vec![
             Token::Location {
+                block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: 2,
             },
@@ -587,10 +596,12 @@ mod tests {
     fn test_parse_delete() {
         let tokens = vec![
             Token::Location {
+                block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: 2,
             },
             Token::Delete {
+                block: false,
                 lines: vec!["    let x = 1;".to_string()],
                 line: 4,
             },
@@ -613,10 +624,12 @@ mod tests {
     fn test_parse_delete_multiple_lines() {
         let tokens = vec![
             Token::Location {
+                block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: 2,
             },
             Token::Delete {
+                block: false,
                 lines: vec!["line1".to_string(), "line2".to_string()],
                 line: 5,
             },
@@ -653,5 +666,109 @@ mod tests {
     fn test_off_target_new_value() {
         let target = OffTarget::New;
         assert_eq!(target, OffTarget::New);
+    }
+
+    // ============================================================
+    // Phase 3: Location:Block / Delete:Block 解析测试
+    // ============================================================
+
+    #[test]
+    fn test_parse_location_block() {
+        let tokens = vec![
+            Token::Open {
+                file_path: "./test.rs".to_string(),
+                line: 1,
+            },
+            Token::Location {
+                block: true,
+                lines: vec!["fn example() {".to_string()],
+                line: 2,
+            },
+        ];
+        let commands = Parser::parse(tokens).unwrap();
+        assert_eq!(commands.len(), 2);
+        match &commands[1] {
+            Command::Location { block, content } => {
+                assert!(block, "Location:Block should set block=true");
+                assert_eq!(content.lines.len(), 1);
+                assert_eq!(content.lines[0].content, "fn example() {");
+            }
+            _ => panic!("Expected Location command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_block() {
+        let tokens = vec![
+            Token::Open {
+                file_path: "./test.rs".to_string(),
+                line: 1,
+            },
+            Token::Location {
+                block: true,
+                lines: vec!["fn example() {".to_string()],
+                line: 2,
+            },
+            Token::Delete {
+                block: true,
+                lines: vec![],
+                line: 3,
+            },
+        ];
+        let commands = Parser::parse(tokens).unwrap();
+        assert_eq!(commands.len(), 3);
+        match &commands[2] {
+            Command::Delete { block, content } => {
+                assert!(block, "Delete:Block should set block=true");
+                // content is empty vec since Delete:Block has no content lines
+                assert!(content.is_some());
+            }
+            _ => panic!("Expected Delete command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_block_requires_location_block() {
+        // Delete:Block after non-Block Location should fail
+        let tokens = vec![
+            Token::Open {
+                file_path: "./test.rs".to_string(),
+                line: 1,
+            },
+            Token::Location {
+                block: false,
+                lines: vec!["fn example() {".to_string()],
+                line: 2,
+            },
+            Token::Delete {
+                block: true,
+                lines: vec![],
+                line: 3,
+            },
+        ];
+        let result = Parser::parse(tokens);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ParseError::BlockRequiredForDelete { line } => {
+                assert_eq!(line, 3);
+            }
+            _ => panic!("Expected BlockRequiredForDelete error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_location_normal_has_block_false() {
+        let tokens = vec![Token::Location {
+            block: false,
+            lines: vec!["fn main() {".to_string()],
+            line: 1,
+        }];
+        let commands = Parser::parse(tokens).unwrap();
+        match &commands[0] {
+            Command::Location { block, .. } => {
+                assert!(!block, "Normal Location should have block=false");
+            }
+            _ => panic!("Expected Location"),
+        }
     }
 }
