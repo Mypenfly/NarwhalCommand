@@ -1,0 +1,34 @@
+//!@Open: ./tests/data/rust_complex.rs
+
+// 三级嵌套：impl ConnectionPool → get_connection → 替换 else 分支
+//!@Location:
+impl ConnectionPool {
+//!@Location:
+    pub fn get_connection(&mut self) -> Option<&mut Connection> {
+//!@Location:
+        } else {
+            None
+//!@Delete:
+        } else {
+            None
+        }
+//!@New:
+        } else {
+            log::warn!("connection pool exhausted (max: {})", self.config.max_connections);
+            None
+        }
+//!@Off:Location
+//!@Off:Location
+//!@Off:Location
+
+// 在 impl AppConfig 末尾添加新方法
+//!@Location:
+impl AppConfig {
+//!@New:
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+//!@Off:Location
+
+//!@Off:Open

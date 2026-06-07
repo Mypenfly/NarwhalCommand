@@ -728,11 +728,16 @@ fn test_python_add_method_to_class() {
     assert!(success, "Python add method script failed");
 
     let content = env.read_target();
-    assert!(content.contains("def reopen_task"), "Should contain new method");
+    assert!(
+        content.contains("def reopen_task"),
+        "Should contain new method"
+    );
     assert!(content.contains("Reopen a previously completed task"));
     assert!(content.contains("task.completed = False"));
 
-    let added: Vec<_> = engine.diff_lines.iter()
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
         .collect();
     assert!(!added.is_empty(), "Should have Added diff lines");
@@ -747,11 +752,22 @@ fn test_python_delete_method() {
     assert!(success, "Python delete method script failed");
 
     let content = env.read_target();
-    assert!(!content.contains("def complete_task"), "complete_task should be deleted");
-    assert!(content.contains("def delete_task"), "delete_task should remain");
-    assert!(content.contains("def count_by_status"), "count_by_status should remain");
+    assert!(
+        !content.contains("def complete_task"),
+        "complete_task should be deleted"
+    );
+    assert!(
+        content.contains("def delete_task"),
+        "delete_task should remain"
+    );
+    assert!(
+        content.contains("def count_by_status"),
+        "count_by_status should remain"
+    );
 
-    let deleted: Vec<_> = engine.diff_lines.iter()
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
         .collect();
     assert!(!deleted.is_empty(), "Should have Deleted diff lines");
@@ -770,10 +786,18 @@ fn test_python_location_block_new() {
     let handle_get_pos = content.find("def handle_get").unwrap();
     let handle_complete_pos = content.find("def handle_complete").unwrap();
     let handle_delete_pos = content.find("def handle_delete").unwrap();
-    assert!(handle_delete_pos > handle_get_pos, "handle_delete should be after handle_get");
-    assert!(handle_delete_pos < handle_complete_pos, "handle_delete should be before handle_complete");
+    assert!(
+        handle_delete_pos > handle_get_pos,
+        "handle_delete should be after handle_get"
+    );
+    assert!(
+        handle_delete_pos < handle_complete_pos,
+        "handle_delete should be before handle_complete"
+    );
 
-    let added: Vec<_> = engine.diff_lines.iter()
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
         .collect();
     assert!(!added.is_empty(), "Should have Added diff lines");
@@ -799,10 +823,18 @@ fn test_rust_location_block_add_method() {
     );
     assert!(content.contains("self.tokens.len()"));
     // impl Parser 原来的内容应保留
-    assert!(content.contains("fn parse_expression"), "parse_expression should remain");
-    assert!(content.contains("fn parse_prefix"), "parse_prefix should remain");
+    assert!(
+        content.contains("fn parse_expression"),
+        "parse_expression should remain"
+    );
+    assert!(
+        content.contains("fn parse_prefix"),
+        "parse_prefix should remain"
+    );
 
-    let added: Vec<_> = engine.diff_lines.iter()
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
         .collect();
     assert!(!added.is_empty(), "Should have Added diff lines");
@@ -818,16 +850,23 @@ fn test_rust_complex_replace() {
 
     let content = env.read_target();
     // 新方法 peek_token 应存在
-    assert!(content.contains("fn peek_token"), "Should contain new peek_token method");
+    assert!(
+        content.contains("fn peek_token"),
+        "Should contain new peek_token method"
+    );
     assert!(content.contains("self.tokens.get(self.position + 1)"));
     // 旧方法也应存在（Delete + New 替换了同一个方法）
     assert!(content.contains("fn current_token"));
 
     // Should have both Added and Deleted diff lines
-    let added: Vec<_> = engine.diff_lines.iter()
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
         .collect();
-    let deleted: Vec<_> = engine.diff_lines.iter()
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
         .collect();
     assert!(!added.is_empty(), "Should have Added diff lines");
@@ -847,14 +886,19 @@ fn test_markdown_add_section() {
     assert!(success, "Markdown add section script failed");
 
     let content = env.read_target();
-    assert!(content.contains("## Known Limitations"), "Should contain new section");
+    assert!(
+        content.contains("## Known Limitations"),
+        "Should contain new section"
+    );
     assert!(content.contains("Rust-style raw string literals"));
     assert!(content.contains("Tab-indented Python"));
     // Original sections should remain
     assert!(content.contains("## Performance Considerations"));
     assert!(content.contains("## File Format Reference"));
 
-    let added: Vec<_> = engine.diff_lines.iter()
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
         .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
         .collect();
     assert!(!added.is_empty(), "Should have Added diff lines");
@@ -872,3 +916,410 @@ fn test_markdown_location_block_rejected() {
     );
 }
 
+// ============================================================
+// 复杂工程文件 + 多层嵌套 / 跨层修改 / Block 操作测试
+// ============================================================
+
+/// 辅助函数：验证文件内容的缩进一致性
+/// 检查所有非空行是否以偶数个空格或仅 tab 缩进
+fn check_indentation_consistency(content: &str) -> Result<(), String> {
+    for (i, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let leading_spaces = line.chars().take_while(|c| *c == ' ').count();
+        // Rust 文件通常 4 空格缩进（或 0），检查是否为 4 的倍数
+        if leading_spaces > 0 && leading_spaces % 4 != 0 {
+            // Python/YAML 可能有 2 空格缩进，允许
+            if leading_spaces % 2 != 0 {
+                return Err(format!(
+                    "行 {} 缩进异常: {} 个空格（期望 2/4 的倍数）\n  {}",
+                    i + 1,
+                    leading_spaces,
+                    line
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_rust_nested_deep_three_levels() {
+    // 四级嵌套 Location：ConnectionPool → get_connection → if-else → Delete+New
+    // 然后在 impl AppConfig 中新增方法
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("rust_nested_deep.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "rust_nested_deep script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: get_connection 的 else 分支被替换为含 log::warn 的版本
+    assert!(
+        result.contains("log::warn!(\"connection pool exhausted"),
+        "Should contain log::warn in replaced else branch\n{}",
+        result
+    );
+    assert!(
+        !result.contains("} else {\n            None\n        }"),
+        "Old bare else-None should be removed"
+    );
+
+    // 验证 2: impl AppConfig 末尾新增了 with_name 方法
+    assert!(
+        result.contains("pub fn with_name(mut self, name: &str) -> Self {"),
+        "Should contain new with_name method"
+    );
+    assert!(
+        result.contains("self.name = name.to_string();"),
+        "Should contain with_name body"
+    );
+
+    // 验证 3: 原有内容未被破坏
+    assert!(result.contains("pub struct AppConfig"));
+    assert!(result.contains("pub fn validate(&self) -> Result<(), String>"));
+    assert!(result.contains("impl DataPipeline"));
+
+    // 验证 diff_lines
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(
+        added.len() >= 4,
+        "Should have multiple Added lines, got {}",
+        added.len()
+    );
+    assert!(
+        deleted.len() >= 2,
+        "Should have Deleted lines, got {}",
+        deleted.len()
+    );
+
+    // 验证缩进一致性
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_rust_cross_level_new_end_and_nested_replace() {
+    // 跨层修改：impl DataPipeline 末尾 New:End 追加方法，
+    // 同时嵌套进入 execute 方法内替换 match 错误分支
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("rust_cross_level.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "rust_cross_level script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: DataPipeline impl 末尾新增的方法
+    assert!(
+        result.contains("pub fn clear_stages(&mut self) {"),
+        "Should contain clear_stages method"
+    );
+    assert!(
+        result.contains("self.stages.clear();"),
+        "Should contain clear_stages body"
+    );
+    assert!(
+        result.contains("pub fn is_empty(&self) -> bool {"),
+        "Should contain is_empty method"
+    );
+    assert!(
+        result.contains("self.stages.is_empty()"),
+        "Should contain is_empty body"
+    );
+
+    // 验证 2: execute 方法中 Err 分支被替换
+    assert!(
+        result.contains("log::error!(\"stage '{}' error: {}\"") || result.contains("log::error!"),
+        "Should contain log::error in replaced Err branch"
+    );
+    assert!(
+        result.contains("pipeline aborted at"),
+        "Should contain new error message format"
+    );
+    assert!(
+        !result.contains("stage '{}' failed: {}"),
+        "Old error format should be gone (within execute context)"
+    );
+
+    // 验证 3: 原有内容仍在
+    assert!(result.contains("pub fn get_metrics"));
+    assert!(result.contains("pub fn add_stage"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert!(
+        added.len() >= 6,
+        "Should have multiple Added lines, got {}",
+        added.len()
+    );
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_rust_block_ops_delete_block_and_new_fields() {
+    // Location:Block + Delete:Block 删除 impl Default，
+    // 然后在 struct 中添加字段，在 Connection struct 前加 derive
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("rust_block_ops.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "rust_block_ops script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: impl Default for AppConfig 被完全删除
+    assert!(
+        !result.contains("impl Default for AppConfig"),
+        "impl Default for AppConfig should be deleted"
+    );
+
+    // 验证 2: AppConfig struct 新增字段
+    assert!(
+        result.contains("pub log_level: String"),
+        "Should contain new log_level field"
+    );
+    assert!(
+        result.contains("pub retry_count: u32"),
+        "Should contain new retry_count field"
+    );
+
+    // 验证 3: struct Connection 前有 derive 属性
+    let conn_pos = result.find("struct Connection {").unwrap();
+    let before_conn = &result[..conn_pos];
+    assert!(
+        before_conn.contains("#[derive(Debug, Clone)]"),
+        "Should have derive attribute before struct Connection"
+    );
+
+    // 验证 4: 原有 struct 仍然存在
+    assert!(result.contains("pub struct AppConfig"));
+
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(!deleted.is_empty(), "Should have Deleted diff lines");
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_yaml_nested_modify_ci_pipeline() {
+    // YAML CI 管线：在 test job 添加 step，修改 deploy notify payload，
+    // 在 env 块末尾追加变量
+    let env = TestEnv::from_data_file("ci_pipeline.yaml");
+    let script = env.load_script("yaml_nested_edit.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "yaml_nested_edit script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: Cache step 在 Run tests 之后
+    assert!(
+        result.contains("Cache test artifacts"),
+        "Should contain cache step"
+    );
+    assert!(
+        result.contains("actions/cache@v3"),
+        "Should contain cache action reference"
+    );
+
+    // 验证 2: Slack payload 已替换
+    assert!(
+        result.contains("Deployment to staging succeeded"),
+        "Slack payload should be updated"
+    );
+    assert!(
+        !result.contains("Deployment complete"),
+        "Old slack payload should be gone"
+    );
+
+    // 验证 3: 新环境变量
+    assert!(
+        result.contains("LOG_LEVEL: debug"),
+        "Should contain LOG_LEVEL env var"
+    );
+    assert!(
+        result.contains("CACHE_ENABLED: true"),
+        "Should contain CACHE_ENABLED env var"
+    );
+
+    // 验证原有内容
+    assert!(result.contains("CARGO_TERM_COLOR: always"));
+    assert!(result.contains("name: CI Pipeline"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert!(
+        added.len() >= 5,
+        "Should have multiple Added lines, got {}",
+        added.len()
+    );
+}
+
+#[test]
+fn test_rust_edge_cases_empty_location_replace() {
+    // 边界测试：空 Location + Delete + New（替换整个文件某区域内容）
+    // 嵌套 New:Start, 深度缩进保持, 多处独立修改
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("rust_edge_cases.ned");
+
+    let (engine, success) = execute_script(&script);
+    if !success {
+        // 重新执行以获取错误详情
+        let tokens = n_edit::lexer::Lexer::tokenize(&script);
+        match n_edit::parser::Parser::parse(tokens) {
+            Err(e) => panic!("Parse error: {}", e),
+            Ok(commands) => {
+                let mut engine2 = n_edit::engine::Engine::new();
+                match engine2.execute(commands) {
+                    Err(e) => panic!("Engine error: {}", e),
+                    Ok(()) => panic!("Script succeeded in second attempt"),
+                }
+            }
+        }
+    }
+    assert!(success, "rust_edge_cases script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: 测试模块中新增了 test_config_validation
+    assert!(
+        result.contains("fn test_config_validation()"),
+        "Should contain new test function"
+    );
+    assert!(
+        result.contains("config.validate().is_err()"),
+        "Should contain test body"
+    );
+
+    // 验证 2: validate 方法开头有 log::debug
+    assert!(
+        result.contains("log::debug!(\"validating config:"),
+        "Should contain debug log in validate"
+    );
+
+    // 验证 3: execute 的 Ok 分支中有 log::trace
+    assert!(
+        result.contains("log::trace!(\"stage '{}' produced:"),
+        "Should contain trace log in execute"
+    );
+
+    // 验证 4: run_app 中 pipeline.execute 调用被替换
+    assert!(
+        result.contains("// Process the sample input through pipeline"),
+        "Should contain new comment before execute"
+    );
+    assert!(
+        result.contains("log::info!(\"pipeline result:"),
+        "Should contain info log after execute"
+    );
+
+    // 验证 5: 原有内容还在
+    assert!(result.contains("fn test_config_default()"));
+    assert!(result.contains("impl DataPipeline"));
+    assert!(result.contains("impl AppConfig"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(
+        added.len() >= 5,
+        "Should have multiple Added lines, got {}",
+        added.len()
+    );
+    assert!(
+        deleted.len() >= 1,
+        "Should have Deleted lines, got {}",
+        deleted.len()
+    );
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_rust_multiple_independent_locations_in_file() {
+    // 在同一个文件中执行多个独立的 Location 操作（非嵌套），
+    // 验证每次 Location 之间不互相干扰
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let _original = env.read_target();
+
+    // 构造脚本：两个独立的 Location + New
+    let script = format!(
+        "\
+//!@Open: {target}
+//!@Location:
+pub struct AppConfig {{
+    pub name: String,
+    pub version: String,
+//!@New:
+    pub description: String,
+//!@Off:Location
+//!@Location:
+pub struct ConnectionPool {{
+    config: AppConfig,
+//!@New:
+    pool_id: u64,
+//!@Off:Location
+//!@Off:Open
+",
+        target = env.target_path
+    );
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "Multi-location independent script failed");
+
+    let result = env.read_target();
+
+    // AppConfig 新增字段
+    assert!(
+        result.contains("pub description: String"),
+        "AppConfig should have new description field"
+    );
+
+    // ConnectionPool 新增字段
+    assert!(
+        result.contains("pool_id: u64"),
+        "ConnectionPool should have new pool_id field"
+    );
+
+    // 原有内容完整
+    assert!(result.contains("pub name: String"));
+    assert!(result.contains("impl ConnectionPool"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert_eq!(added.len(), 2, "Should have exactly 2 Added lines");
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}

@@ -17,9 +17,11 @@
 
 use crate::error::{FileError, NEditError};
 use crate::matcher::LocationMatcher;
-use crate::model::{ContentBlock, FileContent, Line, MatchInfo};
+use crate::model::BLOCK_SNIPPET_MAX_LINES;
+use crate::model::{ContentBlock, FileContent, Line, LineNumber, MatchInfo, SearchScope};
 use crate::output::{DiffLine, DiffLineKind};
 use crate::parser::{Command, OffTarget};
+use std::collections::HashMap;
 
 /// 命令执行引擎
 ///
@@ -34,6 +36,10 @@ pub struct Engine {
     /// 执行过程中累积的差异输出行（New=Added, Delete=Deleted）
     pub diff_lines: Vec<DiffLine>,
 }
+
+// ============================================================
+// Delete 匹配辅助函数
+// ============================================================
 
 /// 在 ContentBlock 中查找 DeleteContent 的连续匹配区间
 ///
@@ -59,36 +65,111 @@ fn find_delete_match(
             continue;
         }
 
-        let mut matched = true;
-        for (offset, del_line) in del_lines.iter().enumerate() {
-            let block_line = &block.lines[start_idx + offset];
-
-            let block_stripped = block_line.stripped_content();
-            let del_stripped = crate::model::stripped_content(&del_line.content);
-
-            let block_is_empty = block_line.content.trim().is_empty();
-            let del_is_empty = del_line.content.trim().is_empty();
-
-            if block_is_empty && del_is_empty {
-                continue;
-            }
-            if block_is_empty || del_is_empty {
-                matched = false;
-                break;
-            }
-            if block_stripped != del_stripped {
-                matched = false;
-                break;
-            }
-        }
-
-        if matched {
+        if lines_continuously_match(block, del_lines, start_idx) {
             return Some((start_idx, start_idx + del_lines.len() - 1));
         }
     }
 
     None
 }
+
+/// 检查从 start_idx 开始，block 的行是否与 delete_content 所有行连续匹配
+fn lines_continuously_match(
+    block: &ContentBlock,
+    del_lines: &[crate::model::DeleteLine],
+    start_idx: usize,
+) -> bool {
+    for (offset, del_line) in del_lines.iter().enumerate() {
+        let block_line = &block.lines[start_idx + offset];
+
+        let block_stripped = block_line.stripped_content();
+        let del_stripped = crate::model::stripped_content(&del_line.content);
+
+        let block_is_empty = block_line.content.trim().is_empty();
+        let del_is_empty = del_line.content.trim().is_empty();
+
+        if block_is_empty && del_is_empty {
+            continue;
+        }
+        if block_is_empty || del_is_empty {
+            return false;
+        }
+        if block_stripped != del_stripped {
+            return false;
+        }
+    }
+    true
+}
+
+/// 检查 Delete 匹配位置是否与 Location 最后一行的位置紧邻
+///
+/// 若之间隔了非空行，说明 Delete 可能删错了位置。
+fn check_delete_adjacency(block: &ContentBlock, start_idx: usize) -> Result<(), NEditError> {
+    if let MatchInfo::Location { matched_line_count } = &block.match_info {
+        if *matched_line_count == 0 {
+            return Ok(());
+        }
+        let location_last_idx = matched_line_count.saturating_sub(1);
+        if start_idx <= location_last_idx {
+            return Ok(());
+        }
+        let gap_non_empty: Vec<_> = block.lines[location_last_idx + 1..start_idx]
+            .iter()
+            .filter(|l| !l.content.trim().is_empty())
+            .collect();
+        if !gap_non_empty.is_empty() {
+            let loc_last = &block.lines[location_last_idx].content;
+            let del_first = &block.lines[start_idx].content;
+            return Err(NEditError::Match(
+                crate::error::MatchError::DeleteNotAdjacent {
+                    location_last_line: loc_last.clone(),
+                    delete_first_line: del_first.clone(),
+                    gap_lines: gap_non_empty.len(),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 记录被删除的行到 diff_lines
+fn record_deleted_lines(block: &ContentBlock, start_idx: usize, end_idx: usize) -> Vec<DiffLine> {
+    block.lines[start_idx..=end_idx]
+        .iter()
+        .map(|line| DiffLine {
+            kind: DiffLineKind::Deleted,
+            line_number: Some(line.line_num),
+            content: line.content.clone(),
+        })
+        .collect()
+}
+
+/// 构建 Delete 未找到匹配时的错误信息
+fn delete_not_found_error(
+    del_content: &crate::model::DeleteContent,
+    block: &ContentBlock,
+) -> NEditError {
+    let first_del_line = del_content
+        .lines
+        .first()
+        .map(|l| l.content.as_str())
+        .unwrap_or("");
+    let block_snippet = block
+        .lines
+        .iter()
+        .take(BLOCK_SNIPPET_MAX_LINES)
+        .map(|l| l.content.as_str())
+        .collect::<Vec<&str>>()
+        .join("\n");
+    NEditError::Match(crate::error::MatchError::DeleteMatchFailed {
+        delete_content: first_del_line.to_string(),
+        block_snippet,
+    })
+}
+
+// ============================================================
+// Engine 实现
+// ============================================================
 
 impl Default for Engine {
     fn default() -> Self {
@@ -150,22 +231,17 @@ impl Engine {
         block: bool,
     ) -> Result<(), NEditError> {
         let search_scope = self.get_search_scope()?;
-        let block = LocationMatcher::find_unique_block(search_scope, location_content, block)
-            .map_err(NEditError::Match)?;
-        self.block_stack.push(block);
+        let content_block =
+            LocationMatcher::find_unique_block(&search_scope, location_content, block)
+                .map_err(NEditError::Match)?;
+        self.block_stack.push(content_block);
         Ok(())
     }
 
     /// 执行 Off 命令：根据目标弹出栈或写回文件
     fn execute_off(&mut self, target: &OffTarget) -> Result<(), NEditError> {
         match target {
-            OffTarget::Location => {
-                let popped_block = self.block_stack.pop().ok_or(NEditError::Engine(
-                    crate::error::EngineError::BlockStackEmpty,
-                ))?;
-                self.write_back_to_parent(popped_block)?;
-            }
-            OffTarget::New => {
+            OffTarget::Location | OffTarget::New => {
                 let popped_block = self.block_stack.pop().ok_or(NEditError::Engine(
                     crate::error::EngineError::BlockStackEmpty,
                 ))?;
@@ -199,7 +275,6 @@ impl Engine {
         // 保留首行的行号，清空所有行
         let first_line_num = block.start_line;
         block.lines.clear();
-        // 保留占位行以维持行号（避免空行）
         block.lines.push(Line {
             line_num: first_line_num,
             taps: 0,
@@ -212,26 +287,44 @@ impl Engine {
     }
 
     /// 获取当前 Location 的搜索范围
-    fn get_search_scope(&self) -> Result<&FileContent, NEditError> {
-        self.file
-            .as_ref()
-            .ok_or(NEditError::File(FileError::NotFound {
-                path: "(no file opened)".to_string(),
-            }))
+    ///
+    /// 若 block_stack 为空（顶层 Location），搜索范围为完整 FileContent。
+    /// 若 block_stack 非空（嵌套 Location），搜索范围为栈顶 ContentBlock。
+    fn get_search_scope(&self) -> Result<SearchScope<'_>, NEditError> {
+        if let Some(block) = self.block_stack.last() {
+            Ok(SearchScope::Block(block))
+        } else {
+            self.file
+                .as_ref()
+                .map(SearchScope::File)
+                .ok_or(NEditError::File(FileError::NotFound {
+                    path: "(no file opened)".to_string(),
+                }))
+        }
     }
 
     /// 将弹出的 ContentBlock 写回到父级
+    ///
+    /// Phase 4 嵌套：若 block_stack 仍有剩余 Block，将 popped 内容写回父级 Block；
+    /// 否则写回 FileContent。
     fn write_back_to_parent(&mut self, block: ContentBlock) -> Result<(), NEditError> {
-        if let Some(ref mut file) = self.file {
+        if let Some(parent) = self.block_stack.last_mut() {
+            apply_block_to_parent(&block, parent);
+        } else if let Some(ref mut file) = self.file {
             apply_block_to_file(file, &block);
         }
         Ok(())
     }
 
     /// 将所有修改最终写回磁盘文件
+    ///
+    /// Phase 4 嵌套：从内到外逐层弹出并写回父级 Block，
+    /// 最外层写回 FileContent 后落盘。
     fn write_back_to_file(&mut self) -> Result<(), NEditError> {
         while let Some(block) = self.block_stack.pop() {
-            if let Some(ref mut file) = self.file {
+            if let Some(parent) = self.block_stack.last_mut() {
+                apply_block_to_parent(&block, parent);
+            } else if let Some(ref mut file) = self.file {
                 apply_block_to_file(file, &block);
             }
         }
@@ -267,10 +360,7 @@ impl Engine {
     }
 
     /// 在文件/Block 开头插入新内容
-    fn execute_new_start(
-        &mut self,
-        content: &crate::model::NewContent,
-    ) -> Result<(), NEditError> {
+    fn execute_new_start(&mut self, content: &crate::model::NewContent) -> Result<(), NEditError> {
         let new_lines = build_new_lines(content);
         let new_line_count = new_lines.len();
         let added_entries = {
@@ -295,10 +385,7 @@ impl Engine {
     }
 
     /// 在文件/Block 末尾插入新内容
-    fn execute_new_end(
-        &mut self,
-        content: &crate::model::NewContent,
-    ) -> Result<(), NEditError> {
+    fn execute_new_end(&mut self, content: &crate::model::NewContent) -> Result<(), NEditError> {
         let new_lines = build_new_lines(content);
         let new_line_count = new_lines.len();
         let added_entries = {
@@ -326,22 +413,14 @@ impl Engine {
     }
 
     /// 在 Location 匹配位置之后插入新内容
-    fn execute_new_normal(
-        &mut self,
-        content: &crate::model::NewContent,
-    ) -> Result<(), NEditError> {
+    fn execute_new_normal(&mut self, content: &crate::model::NewContent) -> Result<(), NEditError> {
         let insert_pos = {
-            let block = self
-                .block_stack
-                .last_mut()
-                .ok_or(NEditError::Engine(
-                    crate::error::EngineError::MissingLocationForNew,
-                ))?;
+            let block = self.block_stack.last_mut().ok_or(NEditError::Engine(
+                crate::error::EngineError::MissingLocationForNew,
+            ))?;
             match &block.match_info {
                 MatchInfo::Empty => block.lines.len(),
-                MatchInfo::Location {
-                    matched_line_count,
-                } => *matched_line_count,
+                MatchInfo::Location { matched_line_count } => *matched_line_count,
                 MatchInfo::DeleteAt { position } => *position,
             }
         };
@@ -350,12 +429,9 @@ impl Engine {
         let new_line_count = new_lines.len();
 
         let added_entries = {
-            let block = self
-                .block_stack
-                .last_mut()
-                .ok_or(NEditError::Engine(
-                    crate::error::EngineError::MissingLocationForNew,
-                ))?;
+            let block = self.block_stack.last_mut().ok_or(NEditError::Engine(
+                crate::error::EngineError::MissingLocationForNew,
+            ))?;
             if insert_pos >= block.lines.len() {
                 block.lines.extend(new_lines);
             } else {
@@ -375,15 +451,16 @@ impl Engine {
         for (line_num, content) in entries {
             self.diff_lines.push(DiffLine {
                 kind: DiffLineKind::Added,
-                line_number: Some(line_num),
+                line_number: Some(LineNumber::new(line_num)),
                 content,
             });
         }
     }
 
     /// 执行 Delete 命令：在 ContentBlock 中删除匹配内容
-    /// 若 `block` 为 true（Delete:Block），删除整个 ContentBlock 的所有行，
-    /// 仅保留首行行号以避免空行。
+    ///
+    /// 若 `block` 为 true（Delete:Block），删除整个 ContentBlock.
+    /// 否则在 block 内逐行匹配并删除。
     fn execute_delete(
         &mut self,
         block: bool,
@@ -397,98 +474,47 @@ impl Engine {
             crate::error::EngineError::MissingLocationForNew,
         ))?;
 
-        let block = self.block_stack.last_mut().ok_or(NEditError::Engine(
+        let current_block = self.block_stack.last_mut().ok_or(NEditError::Engine(
             crate::error::EngineError::MissingLocationForNew,
         ))?;
 
-        let find_result = find_delete_match(block, del_content);
-        match find_result {
-            Some((start_idx, end_idx)) => {
-                // 检查 Delete 匹配是否紧邻 Location 的最后一行
-                // 空 Location 不检查邻接
-                if let MatchInfo::Location {
-                    matched_line_count,
-                } = &block.match_info
-                {
-                    if *matched_line_count > 0 {
-                        let location_last_idx = matched_line_count.saturating_sub(1);
-                        if start_idx > location_last_idx {
-                            // 检查 Location 最后一行到 Delete 首行之间是否有非空行
-                            let gap_non_empty: Vec<_> =
-                                block.lines[location_last_idx + 1..start_idx]
-                                    .iter()
-                                    .filter(|l| !l.content.trim().is_empty())
-                                    .collect();
-                            if !gap_non_empty.is_empty() {
-                                let loc_last = &block.lines[location_last_idx].content;
-                                let del_first = &block.lines[start_idx].content;
-                                return Err(NEditError::Match(
-                                    crate::error::MatchError::DeleteNotAdjacent {
-                                        location_last_line: loc_last.clone(),
-                                        delete_first_line: del_first.clone(),
-                                        gap_lines: gap_non_empty.len(),
-                                    },
-                                ));
-                            }
-                        }
-                    }
-                }
-                // Record deleted lines before removal
-                for idx in start_idx..=end_idx {
-                    let line = &block.lines[idx];
-                    self.diff_lines.push(DiffLine {
-                        kind: DiffLineKind::Deleted,
-                        line_number: Some(line.line_num),
-                        content: line.content.clone(),
-                    });
-                }
-                block.lines.drain(start_idx..=end_idx);
-                // 更新定位信息：后续 New:Normal 应插入到删除起始位置
-                block.match_info = MatchInfo::DeleteAt {
-                    position: start_idx,
-                };
-                block.reindex();
-                Ok(())
-            }
-            None => {
-                let first_del_line = del_content
-                    .lines
-                    .first()
-                    .map(|l| l.content.as_str())
-                    .unwrap_or("");
-                let block_snippet = block
-                    .lines
-                    .iter()
-                    .take(10)
-                    .map(|l| l.content.as_str())
-                    .collect::<Vec<&str>>()
-                    .join("\n");
-                Err(NEditError::Match(
-                    crate::error::MatchError::DeleteMatchFailed {
-                        delete_content: first_del_line.to_string(),
-                        block_snippet,
-                    },
-                ))
-            }
-        }
+        let (start_idx, end_idx) = match find_delete_match(current_block, del_content) {
+            Some(range) => range,
+            None => return Err(delete_not_found_error(del_content, current_block)),
+        };
+
+        // 检查 Delete 匹配是否紧邻 Location 的最后一行
+        check_delete_adjacency(current_block, start_idx)?;
+
+        // 记录删除行到 diff_lines
+        let deleted = record_deleted_lines(current_block, start_idx, end_idx);
+        self.diff_lines.extend(deleted);
+
+        // 执行删除并更新定位信息
+        current_block.lines.drain(start_idx..=end_idx);
+        current_block.match_info = MatchInfo::DeleteAt {
+            position: start_idx,
+        };
+        current_block.reindex();
+        Ok(())
     }
 }
+
+// ============================================================
+// Block / File 写回辅助函数
+// ============================================================
 
 /// 将 ContentBlock 的修改应用到 FileContent 中对应位置
 ///
 /// 使用 block.start_line 和 block.end_line 确定原始范围，
-/// 将其替换为 block 的当前行。这样 New 插入和 Delete 删除
-/// 都能正确地反映到最终文件中，同时保留 Block 后的内容。
+/// 将其替换为 block 的当前行。
 fn apply_block_to_file(file: &mut FileContent, block: &ContentBlock) {
-    let start_index = block.start_line.saturating_sub(1);
-    let end_index = block.end_line.saturating_sub(1);
+    let start_index = block.start_line.to_index();
+    let end_index = block.end_line.to_index();
 
-    // 移除原始 block 范围（包含首尾）的行
-    // 然后在该位置插入 block 的当前行
     let count = end_index.saturating_sub(start_index) + 1;
     let count = count.min(file.lines.len().saturating_sub(start_index));
 
-    // 在 start_index 位置替换 count 行为 block 的当前行
     let new_lines: Vec<Line> = block
         .lines
         .iter()
@@ -504,15 +530,57 @@ fn apply_block_to_file(file: &mut FileContent, block: &ContentBlock) {
     file.lines
         .splice(start_index..start_index + count, new_lines);
 
-    // 重建行号索引
     reindex_file(file);
+}
+
+/// 将内层 ContentBlock 的修改应用到父级 ContentBlock 中
+///
+/// 用于嵌套 Location 场景（Phase 4）：内层 Block（inner）弹出后，
+/// 通过 start_line 差值计算偏移量，将内层修改合并回父级 Block（outer）。
+fn apply_block_to_parent(inner: &ContentBlock, outer: &mut ContentBlock) {
+    let start_offset = inner
+        .start_line
+        .to_index()
+        .saturating_sub(outer.start_line.to_index());
+    let end_offset = inner
+        .end_line
+        .to_index()
+        .saturating_sub(outer.start_line.to_index());
+
+    let start_offset = start_offset.min(outer.lines.len());
+    let end_offset = end_offset.min(outer.lines.len().saturating_sub(1));
+
+    let count = if end_offset >= start_offset {
+        end_offset - start_offset + 1
+    } else {
+        0
+    };
+
+    let new_lines: Vec<Line> = inner
+        .lines
+        .iter()
+        .map(|line| Line {
+            line_num: line.line_num,
+            taps: line.taps,
+            diff_taps: line.diff_taps,
+            content: line.content.clone(),
+            stripped_content: line.stripped_content.clone(),
+        })
+        .collect();
+
+    outer
+        .lines
+        .splice(start_offset..start_offset + count, new_lines);
+    outer.reindex();
 }
 
 /// 从 NewContent 构建 Line 列表
 ///
 /// 使用 NewContent 中各行的 diff_taps 作为绝对缩进量计算实际 taps，
-/// 生成 Line 结构用于插入。
+/// 生成 Line 结构用于插入。line_num 设为占位值，调用方通过 reindex 重算。
 fn build_new_lines(content: &crate::model::NewContent) -> Vec<Line> {
+    const PLACEHOLDER_LINE_NUM: LineNumber = LineNumber::new(1);
+
     content
         .lines
         .iter()
@@ -531,7 +599,7 @@ fn build_new_lines(content: &crate::model::NewContent) -> Vec<Line> {
             };
             let stripped = crate::model::stripped_content(&indented_content);
             Line {
-                line_num: 0,
+                line_num: PLACEHOLDER_LINE_NUM,
                 taps: actual_taps,
                 diff_taps: 0,
                 content: indented_content,
@@ -549,7 +617,12 @@ fn collect_new_line_info(
 ) -> Vec<(usize, String)> {
     let end = (insert_pos + new_line_count).min(block.lines.len());
     (insert_pos..end)
-        .map(|i| (block.lines[i].line_num, block.lines[i].content.clone()))
+        .map(|i| {
+            (
+                block.lines[i].line_num.to_usize(),
+                block.lines[i].content.clone(),
+            )
+        })
         .collect()
 }
 
@@ -561,19 +634,23 @@ fn collect_new_file_line_info(
 ) -> Vec<(usize, String)> {
     let end = (insert_pos + new_line_count).min(file.lines.len());
     (insert_pos..end)
-        .map(|i| (file.lines[i].line_num, file.lines[i].content.clone()))
+        .map(|i| {
+            (
+                file.lines[i].line_num.to_usize(),
+                file.lines[i].content.clone(),
+            )
+        })
         .collect()
 }
 
-/// 重新为 FileContent 的所有行分配行号和重算 diff_taps
+/// 重新为 FileContent 的所有行分配行号和重算 diff_taps，重建首行索引
 fn reindex_file(file: &mut FileContent) {
     let base_taps = file.lines.first().map(|l| l.taps).unwrap_or(0);
     for (index, line) in file.lines.iter_mut().enumerate() {
-        line.line_num = index + 1;
+        line.line_num = LineNumber::from_index(index);
         line.diff_taps = line.taps.saturating_sub(base_taps);
     }
-    // Rebuild first_line_index
-    let mut index: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut index: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, line) in file.lines.iter().enumerate() {
         index
             .entry(line.stripped_content.clone())
@@ -594,8 +671,6 @@ mod tests {
     /// 辅助结构：持有临时文件及其路径，确保文件在测试期间存活
     struct TempFile {
         path: String,
-        // _file 在结构体存活期间保持文件存在（Drop 时不会删除
-        // 因为 tempfile 在 drop 时会删除，但我们使用 persist 转为永久文件）
         _temp_dir: tempfile::TempDir,
     }
 
@@ -699,16 +774,14 @@ mod tests {
         let tmp = create_temp_file("fn main() {\n    let x = 1;\n}\n");
         let mut engine = Engine::new();
 
-        // 直接调用方法测试中间状态，避免隐式 Off 干扰
         engine.execute_open(&tmp.path).unwrap();
         engine
             .execute_location(&make_location_content(&["fn main() {"]), false)
             .unwrap();
 
-        // 在隐式 Off 之前，block_stack 应有 1 个元素
         assert_eq!(engine.block_stack.len(), 1);
-        let block = &engine.block_stack[0];
-        assert_eq!(block.start_line, 1);
+        let current_block = &engine.block_stack[0];
+        assert_eq!(current_block.start_line, 1);
     }
 
     #[test]
@@ -840,10 +913,9 @@ mod tests {
             .execute_new(&NewPosition::Normal, &new_content)
             .unwrap();
 
-        let block = engine.block_stack.last().unwrap();
-        // Block should have: fn main(), let x = 1, println!("hi"), }
-        assert_eq!(block.lines.len(), 4);
-        assert_eq!(block.lines[1].content, "    let x = 1;");
+        let current_block = engine.block_stack.last().unwrap();
+        assert_eq!(current_block.lines.len(), 4);
+        assert_eq!(current_block.lines[1].content, "    let x = 1;");
     }
 
     #[test]
@@ -890,9 +962,9 @@ mod tests {
             .execute_new(&NewPosition::Normal, &new_content)
             .unwrap();
 
-        let block = engine.block_stack.last().unwrap();
-        assert_eq!(block.lines[1].content, "    let a = 1;");
-        assert_eq!(block.lines[2].content, "        let b = 2;");
+        let current_block = engine.block_stack.last().unwrap();
+        assert_eq!(current_block.lines[1].content, "    let a = 1;");
+        assert_eq!(current_block.lines[2].content, "        let b = 2;");
     }
 
     // ============================================================
@@ -925,7 +997,6 @@ mod tests {
             .execute_location(&make_location_content(&["fn main() {"]), false)
             .unwrap();
 
-        // Delete content that matches non-contiguous lines should fail
         let del_content = make_delete_content(&["    let x = 1;", "    println!(\"{}\", x);"]);
         let result = engine.execute_delete(false, Some(&del_content));
         assert!(result.is_err());
@@ -951,7 +1022,6 @@ mod tests {
         let mut engine = Engine::new();
         engine.execute_open(&tmp.path).unwrap();
 
-        // No Location executed, so block_stack is empty
         let new_content = make_new_content(&["    let x = 1;"]);
         let result = engine.execute_new(&NewPosition::Normal, &new_content);
         assert!(result.is_err());
@@ -1059,10 +1129,8 @@ mod tests {
         assert!(result.is_ok(), "Unexpected error: {:?}", result.err());
 
         assert_eq!(engine.diff_lines.len(), 2);
-        // First comes the Delete (Deleted)
         assert_eq!(engine.diff_lines[0].kind, DiffLineKind::Deleted);
         assert_eq!(engine.diff_lines[0].content, "    old_code();");
-        // Then comes the New (Added)
         assert_eq!(engine.diff_lines[1].kind, DiffLineKind::Added);
         assert_eq!(engine.diff_lines[1].content, "    let x = 1;");
     }
@@ -1107,21 +1175,17 @@ mod tests {
 
     #[test]
     fn test_empty_location_delete_then_new_replaces_deleted() {
-        // 空 Location → Delete → New 应该用 New 内容替换被删除内容的位置
         let tmp = create_temp_file(
             "// header\nfn process() {\n    do_work();\n}\n\nfn main() {\n    old_code();\n}\n",
         );
         let mut engine = Engine::new();
         engine.execute_open(&tmp.path).unwrap();
-        // 空 Location
         engine
             .execute_location(&make_location_content(&[]), false)
             .unwrap();
-        // Delete old_code
         engine
             .execute_delete(false, Some(&make_delete_content(&["    old_code();"])))
             .unwrap();
-        // New should go where old_code was
         engine
             .execute_new(
                 &NewPosition::Normal,
@@ -1129,18 +1193,19 @@ mod tests {
             )
             .unwrap();
 
-        let block = engine.block_stack.last().unwrap();
-        let contents: Vec<&str> = block.lines.iter().map(|l| l.content.as_str()).collect();
-        // new_code should be in the block, old_code should not
+        let current_block = engine.block_stack.last().unwrap();
+        let contents: Vec<&str> = current_block
+            .lines
+            .iter()
+            .map(|l| l.content.as_str())
+            .collect();
         assert!(contents.contains(&"    new_code();"));
         assert!(!contents.contains(&"    old_code();"));
-        // fn main() should still be there
         assert!(contents.contains(&"fn main() {"));
     }
 
     #[test]
     fn test_empty_location_new_without_delete_inserts_at_end() {
-        // 空 Location + New（无 Delete）应在 Block 末尾插入
         let tmp = create_temp_file("line1\nline2\nline3\n");
         let mut engine = Engine::new();
         engine.execute_open(&tmp.path).unwrap();
@@ -1151,14 +1216,13 @@ mod tests {
             .execute_new(&NewPosition::Normal, &make_new_content(&["line4"]))
             .unwrap();
 
-        let block = engine.block_stack.last().unwrap();
-        assert_eq!(block.lines.len(), 4);
-        assert_eq!(block.lines[3].content, "line4");
+        let current_block = engine.block_stack.last().unwrap();
+        assert_eq!(current_block.lines.len(), 4);
+        assert_eq!(current_block.lines[3].content, "line4");
     }
 
     #[test]
     fn test_delete_at_start_then_new_inserts_at_start() {
-        // Delete 在 block 开头（位置 0），后续 New 应在开头插入替换
         let tmp = create_temp_file("old first\nsecond\nthird\n");
         let mut engine = Engine::new();
         engine.execute_open(&tmp.path).unwrap();
@@ -1172,15 +1236,14 @@ mod tests {
             .execute_new(&NewPosition::Normal, &make_new_content(&["new first"]))
             .unwrap();
 
-        let block = engine.block_stack.last().unwrap();
-        assert_eq!(block.lines[0].content, "new first");
-        assert_eq!(block.lines[1].content, "second");
-        assert_eq!(block.lines.len(), 3);
+        let current_block = engine.block_stack.last().unwrap();
+        assert_eq!(current_block.lines[0].content, "new first");
+        assert_eq!(current_block.lines[1].content, "second");
+        assert_eq!(current_block.lines.len(), 3);
     }
 
     #[test]
     fn test_delete_then_new_preserves_indentation() {
-        // Delete+New 替换时应保持原有缩进格式
         let tmp = create_temp_file("impl Foo {\n    fn bar() {\n        old_inner();\n    }\n}\n");
         let mut engine = Engine::new();
         engine.execute_open(&tmp.path).unwrap();
@@ -1197,17 +1260,772 @@ mod tests {
             )
             .unwrap();
 
-        let block = engine.block_stack.last().unwrap();
-        assert!(block
+        let current_block = engine.block_stack.last().unwrap();
+        assert!(current_block
             .lines
             .iter()
             .any(|l| l.content == "        new_inner();"));
-        assert!(!block
+        assert!(!current_block
             .lines
             .iter()
             .any(|l| l.content == "        old_inner();"));
-        // fn bar 和 impl 结构应保持完整
-        assert!(block.lines.iter().any(|l| l.content == "    fn bar() {"));
-        assert!(block.lines.iter().any(|l| l.content == "}"));
+        assert!(current_block
+            .lines
+            .iter()
+            .any(|l| l.content == "    fn bar() {"));
+        assert!(current_block.lines.iter().any(|l| l.content == "}"));
+    }
+
+    // ============================================================
+    // Phase 4: 嵌套 Location 测试
+    // ============================================================
+
+    #[test]
+    fn test_nested_location_basic() {
+        let tmp = create_temp_file(
+            "fn outer() {\n    let x = 1;\n    fn inner() {\n        let y = 2;\n    }\n    let z = 3;\n}\n",
+        );
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn outer() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["    fn inner() {"]), false)
+            .unwrap();
+
+        assert_eq!(engine.block_stack.len(), 2);
+
+        let inner_block = &engine.block_stack[1];
+        assert_eq!(inner_block.start_line, 3);
+        assert!(inner_block.lines.len() >= 3);
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        assert_eq!(engine.block_stack.len(), 1);
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        assert_eq!(engine.block_stack.len(), 0);
+    }
+
+    #[test]
+    fn test_nested_location_new() {
+        let tmp =
+            create_temp_file("fn outer() {\n    fn inner() {\n        let a = 1;\n    }\n}\n");
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn outer() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["    fn inner() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&["        let b = 2;"]),
+            )
+            .unwrap();
+
+        let inner_block = engine.block_stack.last().unwrap();
+        assert!(inner_block
+            .lines
+            .iter()
+            .any(|l| l.content.contains("let b = 2;")));
+        assert!(inner_block.lines.len() >= 4);
+
+        let outer_block = &engine.block_stack[0];
+        assert!(outer_block.lines.len() >= 4);
+    }
+
+    #[test]
+    fn test_nested_location_delete() {
+        let tmp = create_temp_file(
+            "fn outer() {\n    fn inner() {\n        let old = 1;\n        let keep = 2;\n    }\n}\n",
+        );
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn outer() {"]), false)
+            .unwrap();
+        engine
+            .execute_location(&make_location_content(&["    fn inner() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_delete(false, Some(&make_delete_content(&["        let old = 1;"])))
+            .unwrap();
+
+        let inner_block = engine.block_stack.last().unwrap();
+        assert!(!inner_block
+            .lines
+            .iter()
+            .any(|l| l.content.contains("let old")));
+        assert!(inner_block
+            .lines
+            .iter()
+            .any(|l| l.content.contains("let keep")));
+        assert!(inner_block.lines.len() >= 3);
+    }
+
+    #[test]
+    fn test_nested_location_off_chain() {
+        let tmp = create_temp_file(
+            "fn outer() {\n    fn inner() {\n        let old = 1;\n    }\n    let z = 3;\n}\n",
+        );
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn outer() {"]), false)
+            .unwrap();
+        engine
+            .execute_location(&make_location_content(&["    fn inner() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_delete(false, Some(&make_delete_content(&["        let old = 1;"])))
+            .unwrap();
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&["        let new = 2;"]),
+            )
+            .unwrap();
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        assert_eq!(engine.block_stack.len(), 1);
+
+        let outer_block = engine.block_stack.last().unwrap();
+        assert!(outer_block
+            .lines
+            .iter()
+            .any(|l| l.content.contains("let new = 2;")));
+        assert!(!outer_block
+            .lines
+            .iter()
+            .any(|l| l.content.contains("let old")));
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let file = engine.file.as_ref().unwrap();
+        assert!(!file.lines.iter().any(|l| l.content.contains("let old")));
+        assert!(file.lines.iter().any(|l| l.content.contains("let new")));
+        assert!(file.lines.iter().any(|l| l.content.contains("let z")));
+    }
+
+    #[test]
+    fn test_nested_location_with_empty_inner() {
+        let tmp = create_temp_file(
+            "fn outer() {\n    fn inner() {\n        let x = 1;\n    }\n    let y = 2;\n}\n",
+        );
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn outer() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(&make_location_content(&[]), false)
+            .unwrap();
+
+        let inner_block = engine.block_stack.last().unwrap();
+        assert_eq!(inner_block.start_line, 1);
+        assert_eq!(inner_block.lines.len(), 6);
+    }
+
+    #[test]
+    fn test_nested_location_new_start_end() {
+        let tmp =
+            create_temp_file("fn outer() {\n    fn inner() {\n        let x = 1;\n    }\n}\n");
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn outer() {"]), false)
+            .unwrap();
+        engine
+            .execute_location(&make_location_content(&["    fn inner() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Start,
+                &make_new_content(&["        // start of inner"]),
+            )
+            .unwrap();
+
+        let inner_block = engine.block_stack.last().unwrap();
+        assert_eq!(inner_block.lines[0].content, "        // start of inner");
+
+        engine
+            .execute_new(
+                &NewPosition::End,
+                &make_new_content(&["        // end of inner"]),
+            )
+            .unwrap();
+
+        let inner_block = engine.block_stack.last().unwrap();
+        assert_eq!(
+            inner_block.lines.last().unwrap().content,
+            "        // end of inner"
+        );
+    }
+
+    #[test]
+    fn test_nested_location_via_commands() {
+        let tmp =
+            create_temp_file("fn outer() {\n    fn inner() {\n        let a = 1;\n    }\n}\n");
+        let commands = vec![
+            Command::Open {
+                file_path: tmp.path.clone(),
+            },
+            Command::Location {
+                block: false,
+                content: make_location_content(&["fn outer() {"]),
+            },
+            Command::Location {
+                block: false,
+                content: make_location_content(&["    fn inner() {"]),
+            },
+            Command::New {
+                position: NewPosition::Normal,
+                content: make_new_content(&["        let b = 2;"]),
+            },
+            Command::Off {
+                target: OffTarget::Location,
+            },
+            Command::Off {
+                target: OffTarget::Location,
+            },
+        ];
+
+        let mut engine = Engine::new();
+        let result = engine.execute(commands);
+        assert!(result.is_ok(), "Unexpected error: {:?}", result.err());
+
+        let file = engine.file.as_ref().unwrap();
+        assert!(file.lines.iter().any(|l| l.content.contains("let b = 2;")));
+        assert!(file.lines.iter().any(|l| l.content.contains("fn outer")));
+        assert!(file.lines.iter().any(|l| l.content.contains("fn inner")));
+    }
+
+    // ============================================================
+    // Phase 4: 复杂工程场景 — 嵌套 Location 集成测试
+    // ============================================================
+
+    #[test]
+    fn test_nested_three_level_method_match_arm() {
+        let content = [
+            "impl Service {",
+            "    fn process(&self, status: Status) {",
+            "        match status {",
+            "            Status::Active => {",
+            "                self.do_work();",
+            "            }",
+            "            Status::Inactive => {",
+            "                self.skip();",
+            "            }",
+            "        }",
+            "    }",
+            "}",
+        ]
+        .join("\n");
+        let tmp = create_temp_file(&content);
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["impl Service {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["        match status {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["            Status::Active => {"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&["                log::info!(\"processing active status\");"]),
+            )
+            .unwrap();
+
+        let inner = engine.block_stack.last().unwrap();
+        assert!(inner.lines.iter().any(|l| l.content.contains("log::info")));
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let file = engine.file.as_ref().unwrap();
+        assert!(file.lines.iter().any(|l| l.content.contains("log::info")));
+        assert!(file
+            .lines
+            .iter()
+            .any(|l| l.content.contains("Status::Inactive")));
+    }
+
+    #[test]
+    fn test_nested_three_level_async_error_refactor() {
+        let content = [
+            "async fn handle_request(req: Request) -> Result<Response> {",
+            "    let data = fetch_data().await?;",
+            "    if let Some(payload) = data.payload {",
+            "        match payload.kind {",
+            "            Kind::Success => process(payload).await?,",
+            "            Kind::Retry => {",
+            "                self.retry_count += 1;",
+            "                return Err(Error::retry_exhausted());",
+            "            }",
+            "        }",
+            "    }",
+            "    Ok(Response::ok())",
+            "}",
+        ]
+        .join("\n");
+        let tmp = create_temp_file(&content);
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&[
+                    "async fn handle_request(req: Request) -> Result<Response> {",
+                ]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["    if let Some(payload) = data.payload {"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["        Kind::Retry => {"]), false)
+            .unwrap();
+
+        engine
+            .execute_delete(
+                false,
+                Some(&make_delete_content(&[
+                    "            self.retry_count += 1;",
+                    "            return Err(Error::retry_exhausted());",
+                ])),
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&[
+                    "            self.metrics.record_retry();",
+                    "            self.retry_count += 1;",
+                    "            if self.retry_count > 3 {",
+                    "                return Err(Error::retry_exhausted());",
+                    "            }",
+                    "            continue;",
+                ]),
+            )
+            .unwrap();
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let file = engine.file.as_ref().unwrap();
+        let contents: Vec<&str> = file.lines.iter().map(|l| l.content.as_str()).collect();
+        let joined = contents.join("\n");
+
+        assert!(!joined.contains("self.retry_count += 1;\n            return Err"));
+        assert!(joined.contains("self.metrics.record_retry()"));
+        assert!(joined.contains("if self.retry_count > 3"));
+        assert!(joined.contains("Kind::Success"));
+    }
+
+    #[test]
+    fn test_nested_cross_level_new_delete_with_module_end() {
+        let tmp = create_temp_file(
+            "pub mod utils {\n\
+             pub fn validate(input: &str) -> bool {\n\
+             let trimmed = input.trim();\n\
+             if trimmed.is_empty() {\n\
+             self.log_warning();\n\
+             return false;\n\
+             }\n\
+             true\n\
+             }\n\
+             }\n",
+        );
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["pub mod utils {"]), false)
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::End,
+                &make_new_content(&[
+                    "",
+                    "    pub fn sanitize(input: &str) -> String {",
+                    "        input.trim().to_lowercase()",
+                    "    }",
+                ]),
+            )
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["    pub fn validate(input: &str) -> bool {"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["        if trimmed.is_empty() {"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_delete(
+                false,
+                Some(&make_delete_content(&["            self.log_warning();"])),
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&["            crate::log::warn(\"empty input\");"]),
+            )
+            .unwrap();
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let file = engine.file.as_ref().unwrap();
+        let contents: Vec<&str> = file.lines.iter().map(|l| l.content.as_str()).collect();
+        let joined = contents.join("\n");
+
+        assert!(joined.contains("pub fn sanitize"));
+        assert!(joined.contains("input.trim().to_lowercase()"));
+        assert!(!joined.contains("self.log_warning()"));
+        assert!(joined.contains("crate::log::warn"));
+        assert!(joined.contains("pub fn validate"));
+    }
+
+    #[test]
+    fn test_nested_deep_indentation_preserved() {
+        let tmp = create_temp_file(
+            "struct Processor {\n\
+             items: Vec<Item>,\n\
+             }\n\
+             impl Processor {\n\
+             fn run(&mut self) {\n\
+             for item in &self.items {\n\
+             if item.is_valid() {\n\
+             item.process();\n\
+             }\n\
+             }\n\
+             }\n\
+             }\n",
+        );
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["impl Processor {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["    fn run(&mut self) {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["        for item in &self.items {"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["            if item.is_valid() {"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&[
+                    "                log::debug!(\"processing item {}\", item.id);",
+                    "                metrics::increment_counter(\"items_processed\");",
+                ]),
+            )
+            .unwrap();
+
+        let innermost = engine.block_stack.last().unwrap();
+        let logged = innermost
+            .lines
+            .iter()
+            .find(|l| l.content.contains("log::debug"));
+        assert!(logged.is_some(), "log::debug line should exist");
+        assert_eq!(
+            logged.unwrap().taps,
+            16,
+            "log::debug should have 16 spaces indent"
+        );
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let file = engine.file.as_ref().unwrap();
+        assert!(file
+            .lines
+            .iter()
+            .any(|l| l.content.contains("metrics::increment_counter")));
+        assert!(file
+            .lines
+            .iter()
+            .any(|l| l.content.contains("item.process()")));
+    }
+
+    #[test]
+    fn test_nested_multi_operation_inner_block() {
+        let content = [
+            "fn handler() {",
+            "    let config = load_config();",
+            "    let mut buffer = Vec::new();",
+            "    process_data(&mut buffer);",
+            "    let result = finalize(buffer);",
+            "    log_result(&result);",
+            "}",
+        ]
+        .join("\n");
+        let tmp = create_temp_file(&content);
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn handler() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["    let mut buffer = Vec::new();"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&["    buffer.reserve(1024);"]),
+            )
+            .unwrap();
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&[]), false)
+            .unwrap();
+        engine
+            .execute_location(
+                &make_location_content(&["    process_data(&mut buffer);"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_delete(
+                false,
+                Some(&make_delete_content(&["    process_data(&mut buffer);"])),
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&[
+                    "    validate_buffer(&buffer);",
+                    "    transform_data(&mut buffer);",
+                ]),
+            )
+            .unwrap();
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let file = engine.file.as_ref().unwrap();
+        let contents: Vec<&str> = file.lines.iter().map(|l| l.content.as_str()).collect();
+        let joined = contents.join("\n");
+
+        assert!(joined.contains("buffer.reserve(1024)"));
+        assert!(joined.contains("validate_buffer"));
+        assert!(joined.contains("transform_data"));
+        assert!(!joined.contains("process_data(&mut buffer)"));
+        assert!(joined.contains("fn handler() {"));
+        assert!(joined.contains("log_result(&result)"));
+    }
+
+    #[test]
+    fn test_nested_location_block_delete_and_new() {
+        let content = [
+            "impl Calculator {",
+            "    fn add(&self, a: i32, b: i32) -> i32 {",
+            "        a + b",
+            "    }",
+            "    fn old_method(&self) {",
+            "        self.deprecated_work();",
+            "        self.cleanup();",
+            "    }",
+            "    fn multiply(&self, a: i32, b: i32) -> i32 {",
+            "        a * b",
+            "    }",
+            "}",
+        ]
+        .join("\n");
+        let tmp = create_temp_file(&content);
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["impl Calculator {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&[
+                    "    fn old_method(&self) {",
+                    "        self.deprecated_work();",
+                ]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_delete(
+                false,
+                Some(&make_delete_content(&[
+                    "    fn old_method(&self) {",
+                    "        self.deprecated_work();",
+                    "        self.cleanup();",
+                    "    }",
+                ])),
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&[
+                    "    fn subtract(&self, a: i32, b: i32) -> i32 {",
+                    "        a - b",
+                    "    }",
+                ]),
+            )
+            .unwrap();
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let file = engine.file.as_ref().unwrap();
+        let contents: Vec<&str> = file.lines.iter().map(|l| l.content.as_str()).collect();
+        let joined = contents.join("\n");
+
+        assert!(!joined.contains("fn old_method"));
+        assert!(!joined.contains("deprecated_work"));
+        assert!(joined.contains("fn subtract"));
+        assert!(joined.contains("fn add"));
+        assert!(joined.contains("fn multiply"));
+    }
+
+    #[test]
+    fn test_nested_diff_lines_tracks_all_changes() {
+        let tmp = create_temp_file("fn run() {\n    let x = old_calc();\n    let y = x + 1;\n}\n");
+        let mut engine = Engine::new();
+        engine.execute_open(&tmp.path).unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["fn run() {"]), false)
+            .unwrap();
+
+        engine
+            .execute_location(&make_location_content(&["    let x = old_calc();"]), false)
+            .unwrap();
+
+        engine
+            .execute_delete(
+                false,
+                Some(&make_delete_content(&["    let x = old_calc();"])),
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&["    let x = new_calc();", "    debug_assert!(x >= 0);"]),
+            )
+            .unwrap();
+
+        engine
+            .execute_location(
+                &make_location_content(&["    debug_assert!(x >= 0);"]),
+                false,
+            )
+            .unwrap();
+
+        engine
+            .execute_new(
+                &NewPosition::Normal,
+                &make_new_content(&["    log::info!(\"x = {}\", x);"]),
+            )
+            .unwrap();
+
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+        engine.execute_off(&OffTarget::Location).unwrap();
+
+        let added: Vec<_> = engine
+            .diff_lines
+            .iter()
+            .filter(|d| d.kind == DiffLineKind::Added)
+            .collect();
+        let deleted: Vec<_> = engine
+            .diff_lines
+            .iter()
+            .filter(|d| d.kind == DiffLineKind::Deleted)
+            .collect();
+
+        assert_eq!(deleted.len(), 1, "Should have 1 deleted line");
+        assert!(deleted[0].content.contains("old_calc"));
+        assert_eq!(added.len(), 3, "Should have 3 added lines");
+        assert!(added.iter().any(|d| d.content.contains("new_calc")));
+        assert!(added.iter().any(|d| d.content.contains("debug_assert")));
+        assert!(added.iter().any(|d| d.content.contains("log::info")));
     }
 }

@@ -9,6 +9,94 @@
 
 use std::collections::HashMap;
 
+// ============================================================
+// Newtype 包装
+// ============================================================
+
+/// 文件中的行号（从 1 开始计数）
+///
+/// 与普通 `usize` 区分，避免与数组索引（从 0 开始）混淆。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LineNumber(usize);
+
+impl LineNumber {
+    /// 从 1-based 行号创建
+    pub const fn new(line_number: usize) -> Self {
+        LineNumber(line_number)
+    }
+
+    /// 从 0-based 数组索引转换为 1-based 行号
+    pub fn from_index(index: usize) -> Self {
+        LineNumber(index + 1)
+    }
+
+    /// 转换为裸 usize 值（1-based 行号）
+    pub fn to_usize(self) -> usize {
+        self.0
+    }
+
+    /// 转换为 0-based 数组索引
+    pub fn to_index(self) -> usize {
+        self.0.saturating_sub(1)
+    }
+
+    /// 饱和减法
+    pub fn saturating_sub(self, rhs: usize) -> Self {
+        LineNumber(self.0.saturating_sub(rhs).max(1))
+    }
+}
+
+impl std::fmt::Display for LineNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::ops::Add<usize> for LineNumber {
+    type Output = LineNumber;
+    fn add(self, rhs: usize) -> LineNumber {
+        LineNumber(self.0 + rhs)
+    }
+}
+
+impl std::ops::Sub<usize> for LineNumber {
+    type Output = LineNumber;
+    fn sub(self, rhs: usize) -> LineNumber {
+        LineNumber(self.0.saturating_sub(rhs).max(1))
+    }
+}
+
+impl PartialEq<usize> for LineNumber {
+    fn eq(&self, other: &usize) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<usize> for LineNumber {
+    fn partial_cmp(&self, other: &usize) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+// ============================================================
+// 常量
+// ============================================================
+
+/// 错误信息中展示的代码块摘要最大行数
+pub const BLOCK_SNIPPET_MAX_LINES: usize = 10;
+/// 匹配错误中展示的候选数量上限
+pub const MAX_CANDIDATE_DISPLAY: usize = 3;
+/// 候选行内容截断长度
+pub const CANDIDATE_SNIPPET_MAX_LEN: usize = 60;
+/// 花括号语言检测时向前探查的行数
+pub const LANGUAGE_DETECT_WINDOW: usize = 5;
+/// 缩进语言检测时向前探查的行数
+pub const INDENT_DETECT_WINDOW: usize = 20;
+
+// ============================================================
+// 工具函数
+// ============================================================
+
 /// 去除字符串中的所有空白字符，返回新字符串
 ///
 /// 用于纯字符匹配：将源码行中的空格、tab 等全部移除后比对。
@@ -21,13 +109,17 @@ pub fn count_leading_spaces(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ').count()
 }
 
+// ============================================================
+// 数据结构
+// ============================================================
+
 /// 逐行解析后的行数据
 ///
 /// 每一行保留原始内容的同时，预计算缩进信息以加速匹配。
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Line {
     /// 在文件中的行号（从 1 开始计数）
-    pub line_num: usize,
+    pub line_num: LineNumber,
     /// 行首空格数量（只计 ASCII 0x20，tab 按配置折算）
     pub taps: usize,
     /// 相对于所在 ContentBlock 首行的缩进差异
@@ -55,7 +147,7 @@ pub struct LocationLine {
     /// 原始内容（保留缩进和空格）
     pub content: String,
     /// 对应原文行号，未解析时为 None
-    pub line_num: Option<usize>,
+    pub line_num: Option<LineNumber>,
 }
 
 /// Location 命令后提取的定位内容
@@ -82,7 +174,7 @@ impl LocationContent {
 #[allow(dead_code)]
 pub struct MatchLine {
     /// 原文行号
-    pub line_num: usize,
+    pub line_num: LineNumber,
     /// 该行在原文中的缩进量（空格数）
     pub taps: usize,
     /// 缩进差异（以本组第一行为基准）
@@ -96,7 +188,7 @@ pub struct MatchLine {
 #[allow(dead_code)]
 pub struct FirstMatchContent {
     /// 匹配到的首行在原文中的行号
-    pub start_line: usize,
+    pub start_line: LineNumber,
     /// 从 start_line 起向后取与 LocationContent 等行数的内容
     pub lines: Vec<MatchLine>,
 }
@@ -118,11 +210,13 @@ pub enum MatchInfo {
 #[derive(Debug, PartialEq)]
 pub struct ContentBlock {
     /// Block 在文件中的起始行号（1-based）
-    pub start_line: usize,
+    pub start_line: LineNumber,
     /// Block 在文件中的结束行号（1-based），用于精确替换
-    pub end_line: usize,
+    pub end_line: LineNumber,
     /// Block 内包含的所有行
     pub lines: Vec<Line>,
+    /// 首行哈希索引：stripped_content → 行索引列表，用于嵌套 Location 的 O(1) 首行匹配
+    pub first_line_index: HashMap<String, Vec<usize>>,
     /// 定位信息来源，用于确定 New:Normal 的插入位置
     pub match_info: MatchInfo,
 }
@@ -170,12 +264,21 @@ pub struct DeleteContent {
     pub lines: Vec<DeleteLine>,
 }
 
+// ============================================================
+// ContentBlock 方法
+// ============================================================
+
 impl ContentBlock {
-    /// 在 ContentBlock 内重新计算所有行的 line_num 和 diff_taps
+    /// 在 ContentBlock 内重新计算所有行的 line_num、diff_taps 和 first_line_index
     ///
-    /// 以 block 首行为基准，递增分配行号，重算缩进差异。
+    /// 以 block 首行为基准，递增分配行号，重算缩进差异，
+    /// 并重建首行哈希索引供嵌套 Location 使用。
+    ///
+    /// 注意：end_line 不被修改，因为它代表文件中的原始替换范围，
+    /// 由 apply_block_to_file 使用。
     pub fn reindex(&mut self) {
         if self.lines.is_empty() {
+            self.first_line_index.clear();
             return;
         }
         let base_taps = self.lines[0].taps;
@@ -184,15 +287,27 @@ impl ContentBlock {
             line.line_num = base_line_num + index;
             line.diff_taps = line.taps.saturating_sub(base_taps);
         }
+
+        let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            index
+                .entry(line.stripped_content.clone())
+                .or_default()
+                .push(i);
+        }
+        self.first_line_index = index;
     }
 }
+
+// ============================================================
+// FileContent 方法
+// ============================================================
 
 impl FileContent {
     /// 从文件路径读取并构建 FileContent
     ///
     /// 逐行解析文件内容，计算每行的 taps（行首空格数），
     /// 预计算 stripped_content，构建首行哈希索引。
-    /// diff_taps 暂设为 0（Phase 3 再精确计算）。
     pub fn from_path(path: &str) -> Result<Self, crate::error::FileError> {
         let content =
             std::fs::read_to_string(path).map_err(|e| crate::error::FileError::CannotOpen {
@@ -213,7 +328,7 @@ impl FileContent {
                 .push(index);
 
             lines.push(Line {
-                line_num: index + 1,
+                line_num: LineNumber::from_index(index),
                 taps,
                 diff_taps: 0,
                 content: line_content.to_string(),
@@ -246,9 +361,105 @@ impl FileContent {
     }
 }
 
+// ============================================================
+// SearchScope
+// ============================================================
+
+/// Location 的搜索范围
+///
+/// 顶层 Location → 搜索范围 = FileContent
+/// 嵌套 Location → 搜索范围 = 当前 ContentBlock（block_stack 栈顶）
+///
+/// 提供统一的 lines() 和 first_line_index() 访问接口，
+/// 使 LocationMatcher 无需区分搜索范围的具体来源。
+pub enum SearchScope<'a> {
+    /// 搜索范围为完整文件内容
+    File(&'a FileContent),
+    /// 搜索范围为当前 ContentBlock（嵌套 Location）
+    Block(&'a ContentBlock),
+}
+
+impl<'a> SearchScope<'a> {
+    /// 返回搜索范围内的所有行
+    pub fn lines(&self) -> &[Line] {
+        match self {
+            SearchScope::File(f) => &f.lines,
+            SearchScope::Block(b) => &b.lines,
+        }
+    }
+
+    /// 返回首行哈希索引
+    pub fn first_line_index(&self) -> &HashMap<String, Vec<usize>> {
+        match self {
+            SearchScope::File(f) => &f.first_line_index,
+            SearchScope::Block(b) => &b.first_line_index,
+        }
+    }
+
+    /// 返回搜索范围内的行数
+    pub fn len(&self) -> usize {
+        self.lines().len()
+    }
+
+    /// 搜索范围是否为空
+    pub fn is_empty(&self) -> bool {
+        self.lines().is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============================================================
+    // LineNumber 测试
+    // ============================================================
+
+    #[test]
+    fn test_line_number_new() {
+        let ln = LineNumber::new(1);
+        assert_eq!(ln.to_usize(), 1);
+        assert_eq!(ln.to_index(), 0);
+    }
+
+    #[test]
+    fn test_line_number_from_index() {
+        let ln = LineNumber::from_index(0);
+        assert_eq!(ln.to_usize(), 1);
+        let ln = LineNumber::from_index(5);
+        assert_eq!(ln.to_usize(), 6);
+    }
+
+    #[test]
+    fn test_line_number_add() {
+        let ln = LineNumber::new(3);
+        assert_eq!((ln + 2).to_usize(), 5);
+    }
+
+    #[test]
+    fn test_line_number_sub() {
+        let ln = LineNumber::new(5);
+        assert_eq!((ln - 2).to_usize(), 3);
+    }
+
+    #[test]
+    fn test_line_number_sub_saturates() {
+        let ln = LineNumber::new(1);
+        assert_eq!((ln - 5).to_usize(), 1);
+    }
+
+    #[test]
+    fn test_line_number_eq_usize() {
+        let ln = LineNumber::new(3);
+        assert_eq!(ln, 3);
+        assert_ne!(ln, 4);
+    }
+
+    #[test]
+    fn test_line_number_display() {
+        let ln = LineNumber::new(42);
+        assert_eq!(format!("{}", ln), "42");
+    }
 
     // ============================================================
     // Line 测试
@@ -259,7 +470,7 @@ mod tests {
         let content = "    let x = 1;".to_string();
         let stripped = stripped_content(&content);
         let line = Line {
-            line_num: 1,
+            line_num: LineNumber::new(1),
             taps: 4,
             diff_taps: 0,
             content,
@@ -273,7 +484,7 @@ mod tests {
         let content = "\t\tfn foo()".to_string();
         let stripped = stripped_content(&content);
         let line = Line {
-            line_num: 1,
+            line_num: LineNumber::new(1),
             taps: 2,
             diff_taps: 0,
             content,
@@ -287,7 +498,7 @@ mod tests {
         let content = "  a b   c  ".to_string();
         let stripped = stripped_content(&content);
         let line = Line {
-            line_num: 1,
+            line_num: LineNumber::new(1),
             taps: 0,
             diff_taps: 0,
             content,
@@ -299,7 +510,7 @@ mod tests {
     #[test]
     fn test_line_stripped_content_empty_string() {
         let line = Line {
-            line_num: 1,
+            line_num: LineNumber::new(1),
             taps: 0,
             diff_taps: 0,
             content: String::new(),
@@ -371,7 +582,7 @@ mod tests {
     #[test]
     fn test_match_line_creation() {
         let match_line = MatchLine {
-            line_num: 5,
+            line_num: LineNumber::new(5),
             taps: 4,
             diff_taps: 0,
             content: "    let x = 1;".to_string(),
@@ -389,16 +600,16 @@ mod tests {
     #[test]
     fn test_first_match_content_creation() {
         let fmc = FirstMatchContent {
-            start_line: 10,
+            start_line: LineNumber::new(10),
             lines: vec![
                 MatchLine {
-                    line_num: 10,
+                    line_num: LineNumber::new(10),
                     taps: 0,
                     diff_taps: 0,
                     content: "fn main() {".to_string(),
                 },
                 MatchLine {
-                    line_num: 11,
+                    line_num: LineNumber::new(11),
                     taps: 4,
                     diff_taps: 4,
                     content: "    let x = 1;".to_string(),
@@ -416,21 +627,22 @@ mod tests {
     #[test]
     fn test_content_block_creation() {
         let block = ContentBlock {
-            start_line: 5,
-            end_line: 0,
+            start_line: LineNumber::new(5),
+            end_line: LineNumber::new(6),
+            first_line_index: HashMap::new(),
             match_info: MatchInfo::Location {
                 matched_line_count: 2,
             },
             lines: vec![
                 Line {
-                    line_num: 5,
+                    line_num: LineNumber::new(5),
                     taps: 0,
                     diff_taps: 0,
                     content: "fn foo() {".to_string(),
                     stripped_content: stripped_content("fn foo() {"),
                 },
                 Line {
-                    line_num: 6,
+                    line_num: LineNumber::new(6),
                     taps: 4,
                     diff_taps: 4,
                     content: "    bar();".to_string(),
@@ -455,14 +667,14 @@ mod tests {
         let file = FileContent {
             lines: vec![
                 Line {
-                    line_num: 1,
+                    line_num: LineNumber::new(1),
                     taps: 0,
                     diff_taps: 0,
                     content: "// comment".to_string(),
                     stripped_content: stripped_content("// comment"),
                 },
                 Line {
-                    line_num: 2,
+                    line_num: LineNumber::new(2),
                     taps: 0,
                     diff_taps: 0,
                     content: "fn main() {}".to_string(),
@@ -518,7 +730,6 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_string();
 
         let file = FileContent::from_path(&path).unwrap();
-        // diff_taps 暂设为 0（Phase 1 不计算 diff_taps）
         assert_eq!(file.lines[0].diff_taps, 0);
         assert_eq!(file.lines[1].diff_taps, 0);
         assert_eq!(file.lines[2].diff_taps, 0);
@@ -647,21 +858,22 @@ mod tests {
     #[test]
     fn test_content_block_reindex_updates_line_numbers() {
         let mut block = ContentBlock {
-            start_line: 5,
-            end_line: 0,
+            start_line: LineNumber::new(5),
+            end_line: LineNumber::new(6),
+            first_line_index: HashMap::new(),
             match_info: MatchInfo::Location {
                 matched_line_count: 1,
             },
             lines: vec![
                 Line {
-                    line_num: 5,
+                    line_num: LineNumber::new(5),
                     taps: 4,
                     diff_taps: 0,
                     content: "    a();".to_string(),
                     stripped_content: stripped_content("    a();"),
                 },
                 Line {
-                    line_num: 5,
+                    line_num: LineNumber::new(5),
                     taps: 8,
                     diff_taps: 0,
                     content: "        b();".to_string(),
@@ -679,8 +891,9 @@ mod tests {
     #[test]
     fn test_content_block_reindex_empty_block() {
         let mut block = ContentBlock {
-            start_line: 1,
-            end_line: 0,
+            start_line: LineNumber::new(1),
+            end_line: LineNumber::new(1),
+            first_line_index: HashMap::new(),
             match_info: MatchInfo::Empty,
             lines: vec![],
         };

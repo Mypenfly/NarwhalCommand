@@ -1,0 +1,37 @@
+//!@Open: ./tests/data/ci_pipeline.yaml
+
+// 在 test job 的 "Run tests" step 之后添加 cache step
+//!@Location:
+      - name: Run tests
+        run: cargo test --verbose
+//!@New:
+      - name: Cache test artifacts
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+//!@Off:Location
+
+// 替换 deploy job 中 Slack notify 的 payload
+//!@Location:
+      - name: Notify
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: '{"text": "Deployment complete"}'
+//!@Delete:
+          payload: '{"text": "Deployment complete"}'
+//!@New:
+          payload: '{"text": "Deployment to staging succeeded"}'
+//!@Off:Location
+
+// 在 env 块末尾追加新变量
+//!@Location:
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+//!@New:
+  LOG_LEVEL: debug
+  CACHE_ENABLED: true
+//!@Off:Location
+
+//!@Off:Open

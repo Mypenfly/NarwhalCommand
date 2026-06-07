@@ -48,6 +48,29 @@ fn main() {
 //!@Off:Open
 ```
 
+### 嵌套定位（精确操作深层代码）
+
+```ned
+//!@Open: src/handler.rs
+//!@Location:
+impl RequestProcessor {
+//!@Location:
+    fn handle_active(&self) {
+//!@Location:
+        match self.state {
+            State::Running => {
+//!@Delete:
+                self.old_logic();
+...
+//!@New:
+                self.new_pipeline();
+...
+//!@Off:Location
+//!@Off:Location
+//!@Off:Location
+//!@Off:Open
+```
+
 ### 在类中新增方法（Python）
 
 ```ned
@@ -87,7 +110,7 @@ fn new_parser(input: &str) -> ParseResult {
 | 命令 | 说明 |
 |------|------|
 | `Open:` | 打开目标文件 |
-| `Location:` | 定位代码位置 |
+| `Location:` | 定位代码位置（支持嵌套，逐级缩小范围） |
 | `Location:Block` | 定位完整代码块 |
 | `New:` | 在定位位置后插入 |
 | `New:Start` | 在文件开头插入 |
@@ -104,7 +127,7 @@ fn new_parser(input: &str) -> ParseResult {
 Phase 1: Open / Location / Off        ✅ 已完成
 Phase 2: New / Delete                 ✅ 已完成
 Phase 3: Location:Block / Delete:Block ✅ 已完成
-Phase 4: 嵌套 Location                待实现
+Phase 4: 嵌套 Location                 ✅ 已完成
 Phase 5: 行号定位 + Raw 命令          待实现
 Phase 6: 错误美化 / 彩色输出           ✅ 已完成
 Phase 7: 扩展命令（Include 等）        待实现
@@ -123,7 +146,7 @@ Phase 7: 扩展命令（Include 等）        待实现
 
 ```bash
 cargo build              # 构建
-cargo test               # 173 个测试
+cargo test               # 191 个测试
 cargo fmt --check        # 格式检查
 cargo clippy -- -D warnings  # Lint
 
@@ -139,9 +162,9 @@ src/
   main.rs      # CLI 入口
   lexer.rs     # 词法分析：//!@ 识别 → Token 流
   parser.rs    # 语法分析：Token → Command AST
-  engine.rs    # 执行引擎：状态机，逐条执行命令
-  matcher.rs   # 核心匹配算法
-  block.rs     # Block 解析（花括号/缩进）
+  engine.rs    # 执行引擎：状态机，逐条执行命令（含嵌套 Location）
+  matcher.rs   # 核心匹配算法（含 SearchScope 抽象）
+  block.rs     # Block 解析（花括号/缩进，Phase 3/4 共用）
   model.rs     # 数据结构定义
   error.rs     # 错误类型集中定义
   output.rs    # 彩色终端输出

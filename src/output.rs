@@ -12,6 +12,7 @@
 //!
 //! 详见 INSTRUCTION.md 第 5.2 节 "输出格式"
 
+use crate::model::LineNumber;
 use colored::Colorize;
 use std::io::IsTerminal;
 
@@ -33,7 +34,7 @@ pub struct DiffLine {
     /// 差异状态
     pub kind: DiffLineKind,
     /// 行号（可选的）
-    pub line_number: Option<usize>,
+    pub line_number: Option<LineNumber>,
     /// 内容文本
     pub content: String,
 }
@@ -134,6 +135,7 @@ impl OutputFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::LineNumber;
 
     #[test]
     fn test_output_formatter_no_color_creates_correct_prefixes() {
@@ -141,17 +143,17 @@ mod tests {
         let lines = vec![
             DiffLine {
                 kind: DiffLineKind::Added,
-                line_number: Some(3),
+                line_number: Some(LineNumber::new(3)),
                 content: "let x = 1;".to_string(),
             },
             DiffLine {
                 kind: DiffLineKind::Deleted,
-                line_number: Some(4),
+                line_number: Some(LineNumber::new(4)),
                 content: "old_code();".to_string(),
             },
             DiffLine {
                 kind: DiffLineKind::Unchanged,
-                line_number: Some(5),
+                line_number: Some(LineNumber::new(5)),
                 content: "fn main() {".to_string(),
             },
         ];
@@ -185,21 +187,22 @@ mod tests {
     fn test_output_formatter_format_block() {
         use crate::model::{ContentBlock, Line, MatchInfo};
         let block = ContentBlock {
-            start_line: 10,
-            end_line: 11,
+            start_line: LineNumber::new(10),
+            end_line: LineNumber::new(11),
+            first_line_index: std::collections::HashMap::new(),
             match_info: MatchInfo::Location {
                 matched_line_count: 1,
             },
             lines: vec![
                 Line {
-                    line_num: 10,
+                    line_num: LineNumber::new(10),
                     taps: 0,
                     diff_taps: 0,
                     content: "fn foo() {".to_string(),
                     stripped_content: crate::model::stripped_content("fn foo() {"),
                 },
                 Line {
-                    line_num: 11,
+                    line_num: LineNumber::new(11),
                     taps: 4,
                     diff_taps: 4,
                     content: "    bar();".to_string(),

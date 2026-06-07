@@ -259,6 +259,7 @@ fn build_delete_content(raw_lines: Vec<String>) -> DeleteContent {
 mod tests {
     use super::*;
     use crate::lexer::Token;
+    use crate::model::LineNumber;
 
     // ============================================================
     // Command / OffTarget 创建测试
@@ -323,7 +324,7 @@ mod tests {
     fn test_parse_single_open() {
         let tokens = vec![Token::Open {
             file_path: "./test.rs".to_string(),
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 1);
@@ -337,7 +338,7 @@ mod tests {
     fn test_parse_single_off_open() {
         let tokens = vec![Token::Off {
             target: "Open".to_string(),
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 1);
@@ -351,7 +352,7 @@ mod tests {
     fn test_parse_single_off_location() {
         let tokens = vec![Token::Off {
             target: "Location".to_string(),
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 1);
@@ -366,7 +367,7 @@ mod tests {
         let tokens = vec![Token::Location {
             block: false,
             lines: vec!["fn main() {".to_string(), "    let x = 1;".to_string()],
-            line: 2,
+            line: LineNumber::new(2),
         }];
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 1);
@@ -391,7 +392,7 @@ mod tests {
                 "    let x = 1;".to_string(),
                 "        let y = 2;".to_string(),
             ],
-            line: 2,
+            line: LineNumber::new(2),
         }];
         let commands = Parser::parse(tokens).unwrap();
         match &commands[0] {
@@ -413,7 +414,7 @@ mod tests {
                 "    less indent".to_string(),
                 "            deeper".to_string(),
             ],
-            line: 2,
+            line: LineNumber::new(2),
         }];
         let commands = Parser::parse(tokens).unwrap();
         match &commands[0] {
@@ -431,16 +432,16 @@ mod tests {
         let tokens = vec![
             Token::Open {
                 file_path: "./test.rs".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             },
             Token::Location {
                 block: false,
                 lines: vec!["fn main() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
             Token::Off {
                 target: "Open".to_string(),
-                line: 4,
+                line: LineNumber::new(4),
             },
         ];
         let commands = Parser::parse(tokens).unwrap();
@@ -463,7 +464,7 @@ mod tests {
     fn test_parse_open_missing_file_path() {
         let tokens = vec![Token::Open {
             file_path: "".to_string(),
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let result = Parser::parse(tokens);
         assert!(result.is_err());
@@ -473,7 +474,7 @@ mod tests {
     fn test_parse_off_invalid_target() {
         let tokens = vec![Token::Off {
             target: "Invalid".to_string(),
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let result = Parser::parse(tokens);
         assert!(result.is_err());
@@ -496,12 +497,12 @@ mod tests {
             Token::Location {
                 block: false,
                 lines: vec!["fn main() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
             Token::New {
                 position: "Normal".to_string(),
                 lines: vec!["    let x = 1;".to_string()],
-                line: 3,
+                line: LineNumber::new(3),
             },
         ];
         let commands = Parser::parse(tokens).unwrap();
@@ -522,7 +523,7 @@ mod tests {
         let tokens = vec![Token::New {
             position: "Start".to_string(),
             lines: vec!["// SPDX-License".to_string()],
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 1);
@@ -542,7 +543,7 @@ mod tests {
         let tokens = vec![Token::New {
             position: "End".to_string(),
             lines: vec!["// END".to_string()],
-            line: 5,
+            line: LineNumber::new(5),
         }];
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 1);
@@ -561,7 +562,7 @@ mod tests {
             Token::Location {
                 block: false,
                 lines: vec!["fn main() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
             Token::New {
                 position: "Normal".to_string(),
@@ -570,7 +571,7 @@ mod tests {
                     "    bar();".to_string(),
                     "        baz();".to_string(),
                 ],
-                line: 3,
+                line: LineNumber::new(3),
             },
         ];
         let commands = Parser::parse(tokens).unwrap();
@@ -598,12 +599,12 @@ mod tests {
             Token::Location {
                 block: false,
                 lines: vec!["fn main() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
             Token::Delete {
                 block: false,
                 lines: vec!["    let x = 1;".to_string()],
-                line: 4,
+                line: LineNumber::new(4),
             },
         ];
         let commands = Parser::parse(tokens).unwrap();
@@ -626,12 +627,12 @@ mod tests {
             Token::Location {
                 block: false,
                 lines: vec!["fn main() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
             Token::Delete {
                 block: false,
                 lines: vec!["line1".to_string(), "line2".to_string()],
-                line: 5,
+                line: LineNumber::new(5),
             },
         ];
         let commands = Parser::parse(tokens).unwrap();
@@ -652,7 +653,7 @@ mod tests {
     fn test_parse_off_new_target() {
         let tokens = vec![Token::Off {
             target: "New".to_string(),
-            line: 6,
+            line: LineNumber::new(6),
         }];
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 1);
@@ -677,12 +678,12 @@ mod tests {
         let tokens = vec![
             Token::Open {
                 file_path: "./test.rs".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             },
             Token::Location {
                 block: true,
                 lines: vec!["fn example() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
         ];
         let commands = Parser::parse(tokens).unwrap();
@@ -702,17 +703,17 @@ mod tests {
         let tokens = vec![
             Token::Open {
                 file_path: "./test.rs".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             },
             Token::Location {
                 block: true,
                 lines: vec!["fn example() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
             Token::Delete {
                 block: true,
                 lines: vec![],
-                line: 3,
+                line: LineNumber::new(3),
             },
         ];
         let commands = Parser::parse(tokens).unwrap();
@@ -720,7 +721,6 @@ mod tests {
         match &commands[2] {
             Command::Delete { block, content } => {
                 assert!(block, "Delete:Block should set block=true");
-                // content is empty vec since Delete:Block has no content lines
                 assert!(content.is_some());
             }
             _ => panic!("Expected Delete command"),
@@ -733,17 +733,17 @@ mod tests {
         let tokens = vec![
             Token::Open {
                 file_path: "./test.rs".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             },
             Token::Location {
                 block: false,
                 lines: vec!["fn example() {".to_string()],
-                line: 2,
+                line: LineNumber::new(2),
             },
             Token::Delete {
                 block: true,
                 lines: vec![],
-                line: 3,
+                line: LineNumber::new(3),
             },
         ];
         let result = Parser::parse(tokens);
@@ -761,7 +761,7 @@ mod tests {
         let tokens = vec![Token::Location {
             block: false,
             lines: vec!["fn main() {".to_string()],
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let commands = Parser::parse(tokens).unwrap();
         match &commands[0] {

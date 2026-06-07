@@ -13,6 +13,8 @@
 //!
 //! 详见 INSTRUCTION.md 第 1.1 节 "架构总览"
 
+use crate::model::LineNumber;
+
 /// 词法分析器产出的 Token
 #[derive(Debug, PartialEq)]
 pub enum Token {
@@ -21,7 +23,7 @@ pub enum Token {
         /// 目标文件路径
         file_path: String,
         /// Token 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// Location 命令：定位代码位置
     Location {
@@ -30,7 +32,7 @@ pub enum Token {
         /// 定位内容的所有行（不含 `//!@` 前缀和 `...` 分隔符）
         lines: Vec<String>,
         /// Token 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// New 命令：插入新内容
     New {
@@ -39,7 +41,7 @@ pub enum Token {
         /// 插入内容的所有行（不含 `//!@` 前缀和 `...` 分隔符）
         lines: Vec<String>,
         /// Token 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// Delete 命令：删除匹配内容
     Delete {
@@ -48,19 +50,19 @@ pub enum Token {
         /// 匹配内容的所有行（不含 `//!@` 前缀和 `...` 分隔符）
         lines: Vec<String>,
         /// Token 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// Off 命令：关闭当前作用域
     Off {
         /// 关闭目标（Open / Location / New）
         target: String,
         /// Token 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// 分隔符 `...`：终止上一个命令的内容提取
     Separator {
         /// Token 所在行号
-        line: usize,
+        line: LineNumber,
     },
 }
 
@@ -77,7 +79,7 @@ impl Lexer {
 
         while let Some((line_index, line)) = lines.next() {
             let trimmed = line.trim();
-            let line_number = line_index + 1;
+            let line_number = LineNumber::from_index(line_index);
 
             // 独立的分隔符 `...`，不依附于任何命令
             if trimmed == "..." {
@@ -202,7 +204,7 @@ mod tests {
     fn test_token_open_creation() {
         let token = Token::Open {
             file_path: "./test.rs".to_string(),
-            line: 1,
+            line: LineNumber::new(1),
         };
         match token {
             Token::Open { file_path, line } => {
@@ -218,7 +220,7 @@ mod tests {
         let token = Token::Location {
             block: false,
             lines: vec!["fn main() {".to_string(), "    let x = 1;".to_string()],
-            line: 3,
+            line: LineNumber::new(3),
         };
         match token {
             Token::Location { lines, line, .. } => {
@@ -234,7 +236,7 @@ mod tests {
     fn test_token_off_creation() {
         let token = Token::Off {
             target: "Open".to_string(),
-            line: 10,
+            line: LineNumber::new(10),
         };
         match token {
             Token::Off { target, line } => {
@@ -264,7 +266,7 @@ mod tests {
             tokens[0],
             Token::Open {
                 file_path: "./src/main.rs".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             }
         );
     }
@@ -278,7 +280,7 @@ mod tests {
             tokens[0],
             Token::Off {
                 target: "Open".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             }
         );
     }
@@ -292,7 +294,7 @@ mod tests {
             tokens[0],
             Token::Off {
                 target: "Location".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             }
         );
     }
@@ -319,13 +321,18 @@ fn main() {
             _ => panic!("Expected Location token"),
         }
 
-        assert_eq!(tokens[1], Token::Separator { line: 4 });
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(4)
+            }
+        );
 
         assert_eq!(
             tokens[2],
             Token::Off {
                 target: "Open".to_string(),
-                line: 5,
+                line: LineNumber::new(5),
             }
         );
     }
@@ -368,7 +375,7 @@ fn main() {
             tokens[0],
             Token::Open {
                 file_path: "./test.rs".to_string(),
-                line: 1,
+                line: LineNumber::new(1),
             }
         );
 
@@ -381,13 +388,18 @@ fn main() {
             _ => panic!("Expected Location token"),
         }
 
-        assert_eq!(tokens[2], Token::Separator { line: 4 });
+        assert_eq!(
+            tokens[2],
+            Token::Separator {
+                line: LineNumber::new(4)
+            }
+        );
 
         assert_eq!(
             tokens[3],
             Token::Off {
                 target: "Open".to_string(),
-                line: 5,
+                line: LineNumber::new(5),
             }
         );
     }
@@ -422,24 +434,29 @@ match_me
             tokens[0],
             Token::Open {
                 file_path: "./test.rs".to_string(),
-                line: 2,
+                line: LineNumber::new(2),
             }
         );
 
         match &tokens[1] {
-            Token::Location { lines: _, line, .. } => {
+            Token::Location { line, .. } => {
                 assert_eq!(*line, 4);
             }
             _ => panic!("Expected Location"),
         }
 
-        assert_eq!(tokens[2], Token::Separator { line: 6 });
+        assert_eq!(
+            tokens[2],
+            Token::Separator {
+                line: LineNumber::new(6)
+            }
+        );
 
         assert_eq!(
             tokens[3],
             Token::Off {
                 target: "Open".to_string(),
-                line: 7,
+                line: LineNumber::new(7),
             }
         );
     }
@@ -473,13 +490,18 @@ match_me
             _ => panic!("Expected New token"),
         }
 
-        assert_eq!(tokens[1], Token::Separator { line: 3 });
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(3)
+            }
+        );
 
         assert_eq!(
             tokens[2],
             Token::Off {
                 target: "Open".to_string(),
-                line: 4,
+                line: LineNumber::new(4),
             }
         );
     }
@@ -504,7 +526,12 @@ match_me
             _ => panic!("Expected New:Start token"),
         }
 
-        assert_eq!(tokens[1], Token::Separator { line: 3 });
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(3)
+            }
+        );
     }
 
     #[test]
@@ -527,7 +554,12 @@ match_me
             _ => panic!("Expected New:End token"),
         }
 
-        assert_eq!(tokens[1], Token::Separator { line: 3 });
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(3)
+            }
+        );
     }
 
     #[test]
@@ -595,13 +627,18 @@ let x = 1;
             _ => panic!("Expected Delete token"),
         }
 
-        assert_eq!(tokens[1], Token::Separator { line: 3 });
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(3)
+            }
+        );
 
         assert_eq!(
             tokens[2],
             Token::Off {
                 target: "Open".to_string(),
-                line: 4,
+                line: LineNumber::new(4),
             }
         );
     }
@@ -678,7 +715,12 @@ let y = 2;
             _ => panic!("Expected Location token"),
         }
 
-        assert_eq!(tokens[1], Token::Separator { line: 3 });
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(3)
+            }
+        );
     }
 
     #[test]
@@ -697,7 +739,12 @@ let y = 2;
             _ => panic!("Expected Delete token"),
         }
 
-        assert_eq!(tokens[1], Token::Separator { line: 3 });
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(3)
+            }
+        );
     }
 
     #[test]

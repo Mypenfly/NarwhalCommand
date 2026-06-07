@@ -11,9 +11,10 @@
 //! ## 对应文档
 //!
 //! 详见 INSTRUCTION.md 第 3.2 节 "Block 解析算法"
+//! Phase 4 嵌套：SearchScope 使 BlockParser 同时支持文件级和 Block 级解析
 
 use crate::error::MatchError;
-use crate::model::FileContent;
+use crate::model::{SearchScope, INDENT_DETECT_WINDOW, LANGUAGE_DETECT_WINDOW};
 
 /// 目标语言类型
 #[derive(Debug, PartialEq)]
@@ -28,7 +29,7 @@ pub enum Language {
 
 /// Block 解析器
 ///
-/// 根据匹配到的位置和文件内容，识别代码块边界。
+/// 根据匹配到的位置和搜索范围，识别代码块边界。
 pub struct BlockParser;
 
 impl BlockParser {
@@ -38,12 +39,12 @@ impl BlockParser {
     /// 1. 检查首行及上下文是否包含 `{` `}` 结构 → 花括号语言
     /// 2. 检查内容 diff_taps 是否不全为 0（有缩进层级）→ 缩进语言
     /// 3. 其他 → Block 不可解析
-    pub fn detect_language(file: &FileContent, start_index: usize) -> Language {
-        let check_end = (start_index + 5).min(file.lines.len());
-        for line_idx in start_index..check_end {
-            let content = &file.lines[line_idx].content;
+    pub fn detect_language(scope: &SearchScope, start_index: usize) -> Language {
+        let scoped_lines = scope.lines();
+        let check_end = (start_index + LANGUAGE_DETECT_WINDOW).min(scoped_lines.len());
+        for line in scoped_lines.iter().take(check_end).skip(start_index) {
+            let content = &line.content;
             let trimmed = content.trim();
-            // 跳过注释行
             if trimmed.starts_with("//") || trimmed.starts_with('#') {
                 continue;
             }
@@ -52,11 +53,9 @@ impl BlockParser {
             }
         }
 
-        // 检查是否有缩进层级
-        let base_taps = file.lines[start_index].taps;
-        let indent_end = (start_index + 20).min(file.lines.len());
-        for line_idx in (start_index + 1)..indent_end {
-            let line = &file.lines[line_idx];
+        let base_taps = scoped_lines[start_index].taps;
+        let indent_end = (start_index + INDENT_DETECT_WINDOW).min(scoped_lines.len());
+        for line in scoped_lines.iter().take(indent_end).skip(start_index + 1) {
             let trimmed = line.content.trim();
             if !trimmed.is_empty()
                 && !trimmed.starts_with("//")
@@ -75,90 +74,29 @@ impl BlockParser {
     /// 从 start_index 行开始逐字符扫描，找到第一个 `{`（作为 block 起始），
     /// 然后追踪其匹配的 `}`，返回 (start_line_index, end_line_index)。
     ///
-    /// 维护 `depth`（括号深度）、`in_string`、`in_comment` 状态，
-    /// 正确处理 `\"`、`\\` 转义，`//` 行注释和 `/* */` 块注释。
+    /// 内部使用 BraceScanner 封装修复扫描状态，逐行处理。
+    ///
+    /// 返回的索引相对于搜索范围（scope.lines()）。
     pub fn parse_brace_block(
-        file: &FileContent,
+        scope: &SearchScope,
         start_index: usize,
     ) -> Result<(usize, usize), MatchError> {
-        let mut depth: i32 = 0;
-        let mut in_string = false;
-        let mut in_block_comment = false;
-        let mut block_start_line: Option<usize> = None;
+        let scoped_lines = scope.lines();
+        let mut scanner = BraceScanner::new();
 
-        for line_idx in start_index..file.lines.len() {
-            let content = &file.lines[line_idx].content;
-            let chars: Vec<char> = content.chars().collect();
-            let mut i = 0;
-            let mut in_line_comment = false;
+        for (line_idx, line) in scoped_lines.iter().enumerate().skip(start_index) {
+            let block_ended = scanner.scan_line(&line.content, line_idx);
+            // block_start_line 由 scan_line 内部在首次遇到 '{' 时设置
 
-            while i < chars.len() {
-                let c = chars[i];
-
-                if in_line_comment {
-                    i += 1;
-                    continue;
+            if block_ended {
+                if let Some(start) = scanner.block_start_line {
+                    return Ok((start, line_idx));
                 }
-                if in_block_comment {
-                    if c == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
-                        in_block_comment = false;
-                        i += 2;
-                        continue;
-                    }
-                    i += 1;
-                    continue;
-                }
-                if in_string {
-                    if c == '\\' && i + 1 < chars.len() {
-                        i += 2;
-                        continue;
-                    }
-                    if c == '"' {
-                        in_string = false;
-                    }
-                    i += 1;
-                    continue;
-                }
-
-                if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-                    in_line_comment = true;
-                    i += 2;
-                    continue;
-                }
-                if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
-                    in_block_comment = true;
-                    i += 2;
-                    continue;
-                }
-                if c == '"' {
-                    in_string = true;
-                    i += 1;
-                    continue;
-                }
-
-                if c == '{' {
-                    if depth == 0 {
-                        depth = 1;
-                        block_start_line = Some(line_idx);
-                    } else {
-                        depth += 1;
-                    }
-                } else if c == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        if let Some(start) = block_start_line {
-                            return Ok((start, line_idx));
-                        }
-                    }
-                }
-
-                i += 1;
             }
         }
 
-        if block_start_line.is_none() {
-            let snippet = file
-                .lines
+        if scanner.block_start_line.is_none() {
+            let snippet = scoped_lines
                 .get(start_index)
                 .map(|l| l.content.as_str())
                 .unwrap_or("");
@@ -167,12 +105,8 @@ impl BlockParser {
             });
         }
 
-        // 括号未闭合（文件末尾），返回到文件末尾
-        let start = match block_start_line {
-            Some(s) => s,
-            None => return Ok((start_index, file.lines.len() - 1)),
-        };
-        Ok((start, file.lines.len() - 1))
+        let start = scanner.block_start_line.unwrap_or(start_index);
+        Ok((start, scoped_lines.len().saturating_sub(1)))
     }
 
     /// 缩进语言 — 解析代码块边界
@@ -181,12 +115,14 @@ impl BlockParser {
     /// 向后逐行扫描，跳过空行和纯注释行。
     /// taps > base_taps → 在 Block 内
     /// taps <= base_taps → Block 结束
-    pub fn parse_indent_block(file: &FileContent, start_index: usize) -> (usize, usize) {
-        let base_taps = file.lines[start_index].taps;
-        let mut end_index = file.lines.len() - 1;
+    ///
+    /// 返回的索引相对于搜索范围（scope.lines()）。
+    pub fn parse_indent_block(scope: &SearchScope, start_index: usize) -> (usize, usize) {
+        let scoped_lines = scope.lines();
+        let base_taps = scoped_lines[start_index].taps;
+        let mut end_index = scoped_lines.len().saturating_sub(1);
 
-        for line_idx in (start_index + 1)..file.lines.len() {
-            let line = &file.lines[line_idx];
+        for (line_idx, line) in scoped_lines.iter().enumerate().skip(start_index + 1) {
             let trimmed = line.content.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
                 continue;
@@ -204,16 +140,18 @@ impl BlockParser {
     ///
     /// 根据语言类型分派到对应的解析方法。
     /// 若语言不可识别则返回 BlockNotParseable 错误。
+    ///
+    /// 返回的索引相对于搜索范围（scope.lines()）。
     pub fn parse_block(
-        file: &FileContent,
+        scope: &SearchScope,
         start_index: usize,
     ) -> Result<(usize, usize), MatchError> {
-        match Self::detect_language(file, start_index) {
-            Language::Brace => Self::parse_brace_block(file, start_index),
-            Language::Indent => Ok(Self::parse_indent_block(file, start_index)),
+        match Self::detect_language(scope, start_index) {
+            Language::Brace => Self::parse_brace_block(scope, start_index),
+            Language::Indent => Ok(Self::parse_indent_block(scope, start_index)),
             Language::Unknown => {
-                let snippet = file
-                    .lines
+                let snippet = scope
+                    .lines()
                     .get(start_index)
                     .map(|l| l.content.as_str())
                     .unwrap_or("");
@@ -225,10 +163,144 @@ impl BlockParser {
     }
 }
 
+/// 花括号扫描器的内部状态
+///
+/// 维护逐字符扫描时的 depth、字符串/注释上下文等状态信息。
+struct BraceScanner {
+    /// 括号嵌套深度（0 = 在 block 外，1+ = 在 block 内）
+    depth: i32,
+    /// 是否在字符串字面量内部
+    in_string: bool,
+    /// 是否在块注释 `/* */` 内部
+    in_block_comment: bool,
+    /// 第一个 `{` 所在的行索引
+    block_start_line: Option<usize>,
+}
+
+impl BraceScanner {
+    fn new() -> Self {
+        BraceScanner {
+            depth: 0,
+            in_string: false,
+            in_block_comment: false,
+            block_start_line: None,
+        }
+    }
+
+    /// 扫描一行内容，更新内部状态
+    ///
+    /// 若当前行首次出现 `{`（depth 从 0 变为正数），记录 block_start_line。
+    /// 返回 true 表示 depth 归零（block 结束被触发）。
+    fn scan_line(&mut self, content: &str, line_idx: usize) -> bool {
+        let chars: Vec<char> = content.chars().collect();
+        let mut i = 0;
+        let mut in_line_comment = false;
+        let mut depth_reached_zero = false;
+
+        while i < chars.len() {
+            let c = chars[i];
+
+            if in_line_comment {
+                i += 1;
+                continue;
+            }
+            if self.in_block_comment {
+                if self.try_consume_comment_end(&chars, &mut i) {
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            if self.in_string {
+                self.consume_string_char(&chars, &mut i);
+                continue;
+            }
+
+            if self.try_consume_comment_start(&chars, &mut i, &mut in_line_comment) {
+                continue;
+            }
+            if c == '"' {
+                self.in_string = true;
+                i += 1;
+                continue;
+            }
+
+            if c == '{' {
+                if self.depth == 0 {
+                    self.depth = 1;
+                    self.block_start_line = Some(line_idx);
+                } else {
+                    self.depth += 1;
+                }
+            } else if c == '}' {
+                self.depth -= 1;
+                if self.depth == 0 {
+                    depth_reached_zero = true;
+                }
+            }
+
+            i += 1;
+        }
+
+        depth_reached_zero
+    }
+
+    /// 尝试消费字符串内的字符（处理 `\"` 和 `\\` 转义）
+    fn consume_string_char(&mut self, chars: &[char], i: &mut usize) {
+        if chars[*i] == '\\' && *i + 1 < chars.len() {
+            *i += 2;
+            return;
+        }
+        if chars[*i] == '"' {
+            self.in_string = false;
+        }
+        *i += 1;
+    }
+
+    /// 尝试消费行注释 `//` 或块注释 `/*` 的起始
+    ///
+    /// 返回 true 表示消费了注释起始标记。
+    fn try_consume_comment_start(
+        &mut self,
+        chars: &[char],
+        i: &mut usize,
+        in_line_comment: &mut bool,
+    ) -> bool {
+        if chars[*i] == '/' && *i + 1 < chars.len() {
+            match chars[*i + 1] {
+                '/' => {
+                    *in_line_comment = true;
+                    *i += 2;
+                    return true;
+                }
+                '*' => {
+                    self.in_block_comment = true;
+                    *i += 2;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// 尝试消费块注释的结束 `*/`
+    ///
+    /// 返回 true 表示消费了注释结束标记。
+    fn try_consume_comment_end(&mut self, chars: &[char], i: &mut usize) -> bool {
+        if chars[*i] == '*' && *i + 1 < chars.len() && chars[*i + 1] == '/' {
+            self.in_block_comment = false;
+            *i += 2;
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{self, FileContent, Line};
+    use crate::model::{self, FileContent, Line, LineNumber, SearchScope};
     use std::collections::HashMap;
 
     /// 辅助函数：根据字符串切片构建 FileContent
@@ -240,7 +312,7 @@ mod tests {
             let stripped = model::stripped_content(content);
             index.entry(stripped.clone()).or_default().push(i);
             file_lines.push(Line {
-                line_num: i + 1,
+                line_num: LineNumber::from_index(i),
                 taps,
                 diff_taps: 0,
                 content: content.to_string(),
@@ -260,13 +332,15 @@ mod tests {
     #[test]
     fn test_detect_language_brace() {
         let file = make_file(&["fn example() {", "    let x = 1;", "}"]);
-        assert_eq!(BlockParser::detect_language(&file, 0), Language::Brace);
+        let scope = SearchScope::File(&file);
+        assert_eq!(BlockParser::detect_language(&scope, 0), Language::Brace);
     }
 
     #[test]
     fn test_detect_language_brace_with_struct() {
         let file = make_file(&["struct Foo {", "    x: i32,", "    y: i32,", "}"]);
-        assert_eq!(BlockParser::detect_language(&file, 0), Language::Brace);
+        let scope = SearchScope::File(&file);
+        assert_eq!(BlockParser::detect_language(&scope, 0), Language::Brace);
     }
 
     #[test]
@@ -279,19 +353,22 @@ mod tests {
             "def other():",
             "    pass",
         ]);
-        assert_eq!(BlockParser::detect_language(&file, 0), Language::Indent);
+        let scope = SearchScope::File(&file);
+        assert_eq!(BlockParser::detect_language(&scope, 0), Language::Indent);
     }
 
     #[test]
     fn test_detect_language_indent_yaml() {
         let file = make_file(&["key:", "  sub1: value1", "  sub2: value2"]);
-        assert_eq!(BlockParser::detect_language(&file, 0), Language::Indent);
+        let scope = SearchScope::File(&file);
+        assert_eq!(BlockParser::detect_language(&scope, 0), Language::Indent);
     }
 
     #[test]
     fn test_detect_language_unknown_plain_text() {
         let file = make_file(&["# Title", "## Section", "Some text."]);
-        assert_eq!(BlockParser::detect_language(&file, 0), Language::Unknown);
+        let scope = SearchScope::File(&file);
+        assert_eq!(BlockParser::detect_language(&scope, 0), Language::Unknown);
     }
 
     // ============================================================
@@ -309,7 +386,8 @@ mod tests {
             "    stuff();",
             "}",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 0);
@@ -328,7 +406,8 @@ mod tests {
             "",
             "fn next() {}",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 0);
@@ -344,7 +423,8 @@ mod tests {
             "    println!(\"{}\", s);",
             "}",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 0);
@@ -359,7 +439,8 @@ mod tests {
             "    let t = \"backslash \\\\ end\";",
             "}",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 0);
@@ -375,7 +456,8 @@ mod tests {
             "    // another } comment",
             "}",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 0);
@@ -391,7 +473,8 @@ mod tests {
             "    let x = 1;",
             "}",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 0);
@@ -401,7 +484,8 @@ mod tests {
     #[test]
     fn test_parse_brace_block_no_brace_returns_error() {
         let file = make_file(&["# Title", "Some text without braces"]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_err());
         match result.unwrap_err() {
             MatchError::BlockNotParseable { .. } => {}
@@ -411,9 +495,9 @@ mod tests {
 
     #[test]
     fn test_parse_brace_block_start_on_second_line() {
-        // The brace is not on the start_index line, but on the next line
         let file = make_file(&["fn example()", "{", "    do_stuff();", "}"]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 1);
@@ -427,11 +511,12 @@ mod tests {
             "    unfinished();",
             "    // no closing brace",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 0);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
         assert_eq!(start, 0);
-        assert_eq!(end, 2); // extends to end of file
+        assert_eq!(end, 2);
     }
 
     // ============================================================
@@ -448,7 +533,8 @@ mod tests {
             "def other():",
             "    pass",
         ]);
-        let (start, end) = BlockParser::parse_indent_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let (start, end) = BlockParser::parse_indent_block(&scope, 0);
         assert_eq!(start, 0);
         assert_eq!(end, 3);
     }
@@ -474,7 +560,8 @@ mod tests {
             "def other_func():",
             "    pass",
         ]);
-        let (start, end) = BlockParser::parse_indent_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let (start, end) = BlockParser::parse_indent_block(&scope, 0);
         assert_eq!(start, 0);
         assert_eq!(end, 14);
     }
@@ -500,7 +587,8 @@ mod tests {
             "",
             "See the [documentation](docs/).",
         ]);
-        let result = BlockParser::parse_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_block(&scope, 0);
         assert!(result.is_err());
         match result.unwrap_err() {
             MatchError::BlockNotParseable { .. } => {}
@@ -515,7 +603,8 @@ mod tests {
             "It has no code structure.",
             "No braces, no indentation.",
         ]);
-        let result = BlockParser::parse_block(&file, 0);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_block(&scope, 0);
         assert!(result.is_err());
         match result.unwrap_err() {
             MatchError::BlockNotParseable { .. } => {}
@@ -525,8 +614,6 @@ mod tests {
 
     #[test]
     fn test_parse_brace_block_within_middle_of_file() {
-        // Test that block detection works correctly when the block
-        // doesn't start at file index 0
         let file = make_file(&[
             "// Header comment",
             "use std::collections::HashMap;",
@@ -546,10 +633,11 @@ mod tests {
             "    // ...",
             "}",
         ]);
-        let result = BlockParser::parse_brace_block(&file, 3);
+        let scope = SearchScope::File(&file);
+        let result = BlockParser::parse_brace_block(&scope, 3);
         assert!(result.is_ok());
         let (start, end) = result.unwrap();
-        assert_eq!(start, 6); // first '{' is on line index 6
-        assert_eq!(end, 11); // matching '}'
+        assert_eq!(start, 6);
+        assert_eq!(end, 11);
     }
 }

@@ -8,6 +8,7 @@
 //!
 //! 详见 INSTRUCTION.md 第 5 节 "错误信息规范"
 
+use crate::model::LineNumber;
 use std::error::Error;
 use std::fmt;
 
@@ -77,25 +78,25 @@ pub enum ParseError {
         /// 无法识别的 Token 文本
         token: String,
         /// 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// New/Delete 命令前缺少 Location（或前一个 Token 是 `...` 产生歧义）
     MissingLocation {
         /// 命令类型（"New" / "Delete"）
         command: String,
         /// 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// 意外的分隔符
     #[allow(dead_code)]
     UnexpectedSeparator {
         /// 所在行号
-        line: usize,
+        line: LineNumber,
     },
     /// Delete:Block 要求前一个 Location 也使用 Block 指令（Phase 3）
     BlockRequiredForDelete {
         /// 所在行号
-        line: usize,
+        line: LineNumber,
     },
 }
 
@@ -325,7 +326,7 @@ mod tests {
     fn test_parse_error_unknown_command_display() {
         let err = ParseError::UnknownCommand {
             token: "BadCmd".to_string(),
-            line: 5,
+            line: LineNumber::new(5),
         };
         let display = format!("{}", err);
         assert!(display.contains("BadCmd"));

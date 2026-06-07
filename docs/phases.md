@@ -165,53 +165,44 @@ cargo run -- test_new_delete.ned   # 执行成功，输出带 + / - 的 diff
 
 ---
 
-## Phase 3: Location:Block + Delete:Block
+## Phase 3: Location:Block + Delete:Block ✅ 已完成
 
 **目标**：代码块精确识别（花括号 / 缩进/类似lsp的精确识别），支持整块增删。
 
-> **当前状态**：Lexer 已处理 `Location:Block` / `Delete:Block` 修饰符（不泄漏为内容），
-> 但 BlockParser 和对应的执行逻辑尚未实现。
+### 3.1 BlockParser ✅
 
-### 3.1 BlockParser
-
-- [ ] `block.rs`：实现 `BlockParser`
-  - `parse_brace_block(file, start_line)` — 花括号语言，逐字符扫描建树
-  - `parse_indent_block(file, start_line)` — 缩进语言，缩进层级判断
-  - `detect_language(first_match)` — 语言类型检测
-- [ ] 花括号扫描器：
+- [x] `block.rs`：实现 `BlockParser`
+  - `parse_brace_block(scope, start_line)` — 花括号语言，逐字符扫描建树
+  - `parse_indent_block(scope, start_line)` — 缩进语言，缩进层级判断
+  - `detect_language(scope)` — 语言类型检测
+- [x] 花括号扫描器：
   - 维护 `depth`、`in_string`、`in_comment` 状态
   - 处理 `\"`, `\\` 转义
   - 处理 `//` 行注释、`/* */` 块注释
 
-### 3.2 数据结构扩展
+### 3.2 数据结构扩展 ✅
 
-- [ ] `Command` 枚举更新：
+- [x] `Command` 枚举更新：
   - `Location` 增加 `block: bool` 标志
-  - `Delete` 增加 `block: bool` 标志（字段已存在，需在 parser 中设置）
+  - `Delete` 增加 `block: bool` 标志
+- [x] `Token::Location` 和 `Token::Delete` 增加 `block: bool` 字段
 
-### 3.3 词法/语法扩展
+### 3.3 词法/语法扩展 ✅
 
-- [x] lexer 识别：`Location:Block`、`Delete:Block`（Lexer 已支持，修饰符不泄漏）
-- [ ] parser：正确设置 `block` 标志（从 Token 无法传递，需扩展 Token 或 parser 逻辑）
-- [ ] 语法校验：`Delete:Block` 要求前一个 Location 也使用 Block
+- [x] lexer 识别：`Location:Block`、`Delete:Block`（修饰符不泄漏到内容）
+- [x] parser：正确设置 `block` 标志
+- [x] 语法校验：`Delete:Block` 要求前一个 Location 也使用 Block（`ParseError::BlockRequiredForDelete`）
 
-### 3.4 执行引擎扩展
+### 3.4 执行引擎扩展 ✅
 
-- [ ] Location:Block → 调用 BlockParser → 精确 ContentBlock（非"到文件末尾"）
-- [ ] Block 不可解析时拒绝 Block 指令 → 报错
-- [ ] Delete:Block → 删除整个 ContentBlock（仅保留首行行号以避免空行）
+- [x] Location:Block → 调用 BlockParser → 精确 ContentBlock（非"到文件末尾"）
+- [x] Block 不可解析时拒绝 Block 指令 → 报错（`MatchError::BlockNotParseable`）
+- [x] Delete:Block → 删除整个 ContentBlock（仅保留首行行号以避免空行）
 
-### 3.5 匹配器增强
+### 3.5 匹配器增强 ✅
 
-- [ ] matcher 引入 diff_taps 校验（当前已实现，Phase 1 已含）
-- [ ] 跳过空行比对（当前已实现）
-
-### 实现建议
-
-1. **Token 扩展**：当前 `Token::Location { lines, line }` 缺少 `block` 字段，建议新增 `Token::Location { block: bool, lines, line }`，同样扩展 `Token::Delete`。
-2. **Block 边界替换**：当前 `build_content_block` 取 `file.lines[start_index..]` 到末尾，Phase 3 需替换为 BlockParser 输出的精确范围。
-3. **Language 检测时机**：在 `expect_single_match` 拿到唯一匹配后，立即对 matched 行做语言检测，而非事后推断。
-4. **花括号扫描器**：建议先实现 Rust/C/JS 的花括号扫描（覆盖主流语言 80%+ 场景），再实现缩进语言（Python/YAML）。
+- [x] matcher 引入 diff_taps 校验
+- [x] 跳过空行比对
 
 ### 验证
 
@@ -223,58 +214,45 @@ cargo test engine::tests::test_delete_block
 
 ---
 
-## Phase 4: 嵌套 Location
+## Phase 4: 嵌套 Location ✅ 已完成
 
 **目标**：Location 在 ContentBlock 内再次定位，递归缩小范围。
 
-> **当前状态**：空 Location 已支持（返回整个搜索范围），但 SearchScope 未抽象，
-> `get_search_scope()` 目前始终返回 `&FileContent`。
+### 4.1 匹配器改造 ✅
 
-### 4.1 匹配器改造
+- [x] `matcher.rs`：`find_unique_block` 接收 `&SearchScope` 参数
+  - 顶层 Location → 搜索范围 = `SearchScope::File`
+  - 嵌套 Location → 搜索范围 = `SearchScope::Block`（栈顶 ContentBlock）
+- [x] `SearchScope<'a>` 枚举统一 FileContent 和 ContentBlock 的访问接口（`lines()` / `first_line_index()`）
 
-- [ ] `matcher.rs`：`find_unique_block` 增加 `search_scope` 参数
-  - 顶层 Location → 搜索范围 = FileContent
-  - 嵌套 Location → 搜索范围 = 当前 ContentBlock
-- [ ] 抽象 `SearchScope` trait 或使用 enum 统一 FileContent 和 ContentBlock 的访问接口
+### 4.2 执行引擎扩展 ✅
 
-### 4.2 执行引擎扩展
-
-- [ ] `engine.rs`：Location 嵌套处理
-  - 栈顶已有 ContentBlock → 搜索范围为栈顶 block
+- [x] `engine.rs`：Location 嵌套处理
+  - 栈顶已有 ContentBlock → 搜索范围 = 栈顶 block（`get_search_scope()`）
   - 匹配结果 push 到 block_stack（缩小范围）
-  - Off:Location 时 pop 并写回上一层（当前 `write_back_to_parent` 已支持）
-  - 嵌套时 `matched_line_count` 计算相对于子 block
+  - ContentBlock 保留绝对文件行号（`Line.line_num`），无需 `parent_offset`
+  - `apply_block_to_parent()`：通过 `start_line` 差值计算偏移，合并内层修改到父级
+  - `write_back_to_parent()`：自动判断写回父级 Block 还是 FileContent
+- [x] Off:Location 时 pop 并写回上一层
+- [x] 嵌套时 `matched_line_count` 计算相对于子 block
 
-### 4.3 嵌套示例测试
+### 4.3 嵌套示例测试 ✅
 
-```rust
-// //!@Open: ./sample.rs
-// //!@Location:
-// fn outer() {
-//     let a = 1;
-//     // 嵌套 Location 定位 inner
-//     //!@Location:
-//     fn inner() {
-//         ...
-//     //!@New:
-//     let x = 2;
-//     //!@Off:Location
-//     //!@Off:Location
-// //!@Off:Open
-```
+集成测试覆盖三级嵌套（impl→方法→match分支）、跨层修改（外层New:End+内层Delete）、深度缩进保持等工程场景。
 
-### 实现建议
+### 实现总结
 
-1. **SearchScope 抽象**：建议定义 `enum SearchScope<'a> { File(&'a FileContent), Block(&'a ContentBlock) }`，实现统一的 `lines()` 和 `first_line_index()` 访问。
-2. **LineNumber 映射**：嵌套 Location 匹配到的是子 ContentBlock 内的相对行号，写回时需要映射到父 ContentBlock 的绝对行号。建议在 `ContentBlock` 中记录 `parent_offset`。
-3. **Off 链处理**：当前 `Off:Location` 只 pop 一次，多层嵌套时需要逐层写回。当前 `write_back_to_file` 已用 `while let Some(block) = self.block_stack.pop()` 处理，可复用。
-4. **先实现 Phase 3 再实现 Phase 4**：嵌套 Location 的正确性依赖精确的 Block 边界解析，否则子 ContentBlock 可能包含不相关的内容。
+1. **SearchScope 抽象**：`enum SearchScope<'a> { File(&'a FileContent), Block(&'a ContentBlock) }`，统一接口消除了匹配器和 BlockParser 对文件范围的假设。
+2. **行号映射**：所有 `Line.line_num` 保持绝对文件行号，匹配候选用 scope 内索引，写回时通过 block 的 `start_line` 计算偏移。
+3. **Off 链处理**：`write_back_to_file` 用 `while let Some(block) = self.block_stack.pop()` 从内到外逐层写回。
+4. **`first_line_index` 支持**：`ContentBlock` 新增 `first_line_index`，`reindex()` 自动重建，使嵌套 Location 搜索保持 O(1) 首行匹配。
 
 ### 验证
 
 ```bash
 cargo test engine::tests::test_nested_location
-cargo test engine::tests::test_nested_location_new
+cargo test engine::tests::test_nested_location_via_commands
+cargo test engine::tests::test_nested_three_level_method_match_arm
 ```
 
 ---
@@ -383,7 +361,7 @@ cargo test engine::tests::test_raw_ellipsis
 ## 阶段依赖关系
 
 ```
-Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ──▶ Phase 4
+Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ✅ ──▶ Phase 4 ✅
                    │         │             │
                    │         ▼             │
                    │    Phase 6 ✅         │
@@ -399,8 +377,8 @@ Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ──▶ Phase 4
 
 - Phase 0 → Phase 1：项目骨架是基础 ✅
 - Phase 1 → Phase 2：New/Delete 依赖 ContentBlock ✅
-- Phase 2 → Phase 3：Block 指令依赖基础 New/Delete
-- Phase 3 → Phase 4：嵌套依赖精确 Block 解析
+- Phase 2 → Phase 3：Block 指令依赖基础 New/Delete ✅
+- Phase 3 → Phase 4：嵌套依赖精确 Block 解析 ✅
 - Phase 5 可与 Phase 3/4 并行（行号定位不依赖嵌套）
 - Phase 6 已基本完成（可在 Phase 2 后持续增强）
 - Phase 7 在所有核心功能稳定后开始
@@ -410,13 +388,13 @@ Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ──▶ Phase 4
 ## 当前测试状态
 
 ```
-cargo test  → 133 passed, 0 failed
+cargo test  → 191 passed, 0 failed
 cargo clippy → 0 warnings
 
 测试分布：
-  src/lib.rs 单元测试       108 个
+  src/lib.rs 单元测试       158 个（含新增 14 个 Phase 4 测试）
   src/main.rs 集成测试       4 个
-  tests/integration_test.rs  21 个
+  tests/integration_test.rs  29 个
 ```
 
 ### 测试覆盖场景
@@ -425,9 +403,10 @@ cargo clippy → 0 warnings
 |------|--------|------|
 | Lexer 词法分析 | 22 | Token 识别、内容提取、Separator、行号、修饰符 |
 | Parser 语法分析 | 22 | Command 构建、diff_taps 计算、歧义检测 |
-| Engine 执行引擎 | 27 | Open/Location/New/Delete/Off 全流程、diff_lines |
-| Matcher 匹配算法 | 8 | 精确匹配、歧义报错、空行跳过、空 Location |
-| Model 数据结构 | 22 | Line/ContentBlock 操作、reindex、文件读写 |
+| Engine 执行引擎 | 41 | Open/Location/New/Delete/Off 全流程、嵌套 Location（Phase 4）、diff_lines |
+| Matcher 匹配算法 | 12 | 精确匹配、歧义报错、空行跳过、空 Location、Block scope 搜索 |
+| Model 数据结构 | 22 | Line/ContentBlock 操作、reindex、first_line_index、文件读写 |
+| Block 解析器 | 18 | 花括号/缩进检测、逐字符扫描、注释/字符串转义处理 |
 | Error 错误类型 | 8 | Display 格式化、错误信息完整性 |
 | Output 输出格式化 | 4 | 彩色/无色、行号、ContentBlock |
-| 集成测试 | 21 | 真实文件 New/Delete/Replace、空 Location、歧义检查 |
+| 集成测试 | 29 | 真实文件 New/Delete/Replace、Location:Block、嵌套操作、歧义检查 |

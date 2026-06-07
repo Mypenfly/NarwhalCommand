@@ -83,6 +83,7 @@ fn main() {
 mod integration_tests {
     use n_edit::engine::Engine;
     use n_edit::lexer::{self, Lexer};
+    use n_edit::model::LineNumber;
     use n_edit::parser::Parser as ScriptParser;
 
     /// 辅助结构：持有临时目录，确保测试文件存活
@@ -108,34 +109,27 @@ mod integration_tests {
     fn test_full_pipeline_open_location_off() {
         let env = TestEnv::new();
 
-        // 创建目标文件
         let target_content =
             "// header\nfn process() {\n    do_work();\n}\n\nfn main() {\n    process();\n}\n";
         let target_path = env.create_file("sample.rs", target_content);
 
-        // 创建 .ned 脚本
         let ned_script = format!(
             "//!@Open: {}\n//!@Location:\nfn main() {{\n...\n//!@Off:Open\n",
             target_path
         );
         let ned_path = env.create_file("test_open_location.ned", &ned_script);
 
-        // 读取脚本文件
         let script_content = std::fs::read_to_string(&ned_path).unwrap();
 
-        // 词法分析
         let tokens = Lexer::tokenize(&script_content);
         assert_eq!(tokens.len(), 4); // Open, Location, Separator, Off
 
-        // 语法分析
         let commands = ScriptParser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 3);
 
-        // 执行
         let mut engine = Engine::new();
         engine.execute(commands).unwrap();
 
-        // 验证文件内容不变（只读操作）
         let result_content = std::fs::read_to_string(&target_path).unwrap();
         assert_eq!(result_content, target_content);
     }
@@ -147,7 +141,6 @@ mod integration_tests {
         let target_content = "fn foo() {}\nfn bar() {}\n";
         let target_path = env.create_file("implicit.rs", target_content);
 
-        // 脚本无显式 Off:Open，依赖隐式 Off
         let ned_script = format!("//!@Open: {}\n//!@Location:\nfn bar() {{}}\n", target_path);
         let ned_path = env.create_file("test_implicit.ned", &ned_script);
 
@@ -164,7 +157,6 @@ mod integration_tests {
             result.err()
         );
 
-        // 文件内容不变
         let result_content = std::fs::read_to_string(&target_path).unwrap();
         assert_eq!(result_content, target_content);
     }
@@ -195,7 +187,7 @@ mod integration_tests {
     fn test_full_pipeline_open_missing_file() {
         let tokens = vec![lexer::Token::Open {
             file_path: "/nonexistent/file.rs".to_string(),
-            line: 1,
+            line: LineNumber::new(1),
         }];
         let commands = ScriptParser::parse(tokens).unwrap();
         let mut engine = Engine::new();
