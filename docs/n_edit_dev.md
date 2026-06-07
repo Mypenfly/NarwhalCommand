@@ -2,7 +2,9 @@
 
 本项目是由设计Ncoding项目的文件操作命令中edit操作的延伸设计。
 
-Ncoding 项目地址：https://github.com/Mypenfly/Ncoding.git，有关开发文档：./ncoding.md
+Ncoding 项目地址：https://github.com/Mypenfly/Ncoding.git
+
+有关开发文档：./ncoding.md
 
 项目特点：
 
@@ -293,5 +295,5 @@ nedit example.nedit
 
 1. 支持一个Include命令，用于将多个修改脚本拼接成一个，避免一个脚本过大过长，不易管理。
 2. 支持一个Async命令和Off:Async配合，将不同的块（非嵌套Location）进行异步并行处理，支持批量，高效处理多个文件/单一大文件
-3. Location支持使用 `//!@Location:@66,120`这样的按行号指定来得到Location内容，以及进一步得到对应的ContentBlock
+3. Location 支持使用 `//!@Location:@66,120`这样的按行号指定来得到Location内容，以及进一步得到对应的ContentBlock ✅ 已实现
 4. 实现修改可逆转，通过同一个修改用脚本。（这里的问题在于使用Delete:Block命令操作之后，好像无法逆转？）

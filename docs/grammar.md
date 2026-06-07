@@ -47,21 +47,43 @@ fn main() {
 
 定位代码位置。**这是修改的前提**——之后的 `New` / `Delete` 都在这个位置范围内操作。
 
+**基础用法（内容匹配）：**
+
 ```ned
 //!@Location:
 fn process_data(items: &[Item]) -> Vec<Output> {
     let mut results = Vec::new();
 ```
 
-定位规则：
-- **第一行去空白匹配**：去掉所有空格后，在目标文件中找相同的第一行
-- **逐行校验**：后续每一行（跳过空行）的去空白内容 + 缩进差异都必须一致
-- **必须唯一**：只能匹配到一个位置，否则报错
+**行号定位（Phase 5）：**
 
-**`Location` 可接受空内容**（`//!@Location:` 后不跟任何内容行）：
-- 空 Location 的搜索范围为**完整文件当前作用域**（顶层 = 整个文件，嵌套 = 父 Block）
-- 适用于"想在文件中自由搜索 Delete 目标"的场景
-- `matched_line_count` 为 0，Delete 的邻接检查被跳过
+支持按行号直接定位，跳过内容匹配流程。行号相对于当前搜索范围（顶层 = 文件行号，嵌套 = 父 Block 内行号）。
+
+```ned
+// 单行号：定位到第 66 行
+//!@Location:@66
+
+// 行号范围：定位到第 66 到 120 行
+//!@Location:@66,120
+
+// 结合 Block 修饰符：从第 66 行起解析完整代码块
+//!@Location:Block @66,120
+
+// 行号后跟匹配内容：有行号时忽略后面的匹配内容
+//!@Location:@10,20
+fn main() {
+// 以上等价于 //!@Location:@10,20，fn main() 内容被忽略
+```
+
+**行号 vs 内容匹配：**
+
+| 特性 | 行号定位 | 内容匹配 |
+|------|---------|---------|
+| 语法 | `@start,end` | 提供代码内容行 |
+| 匹配方式 | 直接按索引截取 | 去空白 + diff_taps 匹配 |
+| 唯一性 | 天然唯一 | 必须恰好匹配 1 个候选 |
+| ContentBlock | 仅包含指定行号范围 | 从匹配首行到范围末尾 |
+| 嵌套 | 行号相对于父 Block | 在当前作用域搜索 |
 
 **常见错误：**
 
@@ -108,6 +130,8 @@ fn example() {
 
 删除定位范围内匹配到的**连续行**。匹配逻辑和 `Location` 一致（去空白比对）。
 
+**基础用法（内容匹配）：**
+
 ```ned
 //!@Location:
 fn update_user(&self, user_id: u64) {
@@ -115,6 +139,24 @@ fn update_user(&self, user_id: u64) {
     log::warn!("deprecated call");
     self.deprecated_update(user_id)
 ```
+
+**行号删除（Phase 5）：**
+
+Delete 同样支持按行号直接删除，行号相对于当前 Block（栈顶 ContentBlock）。有行号时忽略后面的匹配内容。
+
+```ned
+// 单行号：删除当前 Block 的第 3 行
+//!@Delete:@3
+
+// 行号范围：删除当前 Block 的第 3 到第 5 行
+//!@Delete:@3,5
+
+// Delete:Block 与行号配合：先定位 Block 再整体删除
+//!@Location:Block @1,1
+//!@Delete:Block
+```
+
+> **注意**：`New` **不支持**行号。New 的插入位置由 Location 的匹配结果决定。
 
 **Delete 邻接规则：**
 - Delete 首行必须紧邻 Location 最后一行之后（中间不能隔非空行）
@@ -145,6 +187,32 @@ pub fn run_app(config: AppConfig) {
 |----------|------|------|
 | `Delete命令未能在当前Block中找到匹配内容` | 要删除的内容在定位范围内不存在 | 检查内容拼写或调整 Location |
 | `Delete匹配位置与Location不紧邻` | 要删除的内容和定位内容之间有其他代码 | 在中间加嵌套 Location 或扩大 Location 内容直到覆盖间隙 |
+
+---
+
+### `//!@Raw:`（Phase 5）
+
+写入字面量内容，解决 `...` 分隔符的二义性问题。当需要在 New/Delete 内容中写入真正的 `...` 字符时使用。
+
+```ned
+//!@Location:
+fn example() {
+    let x = 0;
+//!@New:
+    println!("start");
+//!@Raw: ...
+//!@Off:Location
+```
+
+Raw 的内容会作为字面量行融入上一个 `New` 或 `Delete` 命令：
+- **New 上下文中**：`is_raw=true` 的新增行，写入原始内容不计算缩进
+- **Delete 上下文中**：`is_raw=true` 的匹配行，按字面量逐字符匹配
+- Raw 必须在 `New` 或 `Delete` 之后使用，否则报错
+
+| 场景 | 说明 |
+|------|------|
+| `New` + `Raw` | 在插入内容中写入字面量 `...` |
+| `Delete` + `Raw` | 匹配包含字面量 `...` 的代码行 |
 
 ---
 
@@ -413,6 +481,7 @@ fn example() {
 | Location 内容后跟嵌套 Location | 不用 `...`，让嵌套 `//!@Location:` 自动终止 |
 | New 内容后跟 Off/Location | 不用 `...`，让下一个 `//!@` 自动终止 |
 | New/Delete 内容后需要结束脚本 | 用 `...` 终止内容，然后跟 `//!@Off:Open` |
+| 需要写入字面量 `...` | 使用 `//!@Raw: ...` |
 
 ---
 
@@ -458,6 +527,7 @@ fn example() {
 1. Location 内容**越具体越安全**——内容太少可能匹配到多个位置
 2. 匹配同时校验**缩进差异（diff_taps）**——即使字符相同，缩进层级不同也会被排除
 3. 空行在匹配时**自动跳过**——Location 内容和文件中的空白行都不影响匹配
+4. **行号定位优先级**：当 Location 同时包含 `@行号` 和定位内容时，优先使用行号定位（跳过 matcher），后面的内容被忽略
 
 ### 修改安全
 
@@ -533,15 +603,21 @@ fn example() {
 Open ──→ Location ──→ [Location]* ──→ New ──→ Off
             │                         │
             │                         ├─→ Delete ──→ Off
+            │                         ├─→ Raw ──→ (融入 New/Delete)
             │                         │
             ├──→ [Location:Block] ────┘
+            │
+            ├──→ [Location:@行号] ──→ New/Delete/Raw ──→ Off:Location
             │
             └──→ [Location (嵌套)] ──→ New/Delete ──→ Off:Location
 ```
 
 - `New` / `Delete` 前必须有 `Location`（或使用 `New:Start` / `New:End`）
 - `Delete:Block` 前必须有 `Location:Block`
+- `Raw` 必须位于 `New` 或 `Delete` 之后，其内容融入上一个命令
 - `...` 在 Token 流中重置 Location 状态（`last_was_location = false`）
+- 行号定位（`@start,end`）：有行号时忽略后面的匹配内容，跳过 matcher 直接按索引截取
+- 嵌套行号定位：行号相对于当前 Block（栈顶 ContentBlock）
 - 脚本结尾自动 `Off:Open`
 
 ---

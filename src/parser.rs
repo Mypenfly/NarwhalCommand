@@ -28,6 +28,8 @@ pub enum Command {
     Location {
         /// 是否为 Location:Block（Phase 3）
         block: bool,
+        /// 行号范围定位（Phase 5）
+        line_range: Option<crate::model::LineRange>,
         /// 用于匹配的定位内容
         content: LocationContent,
     },
@@ -42,8 +44,15 @@ pub enum Command {
     Delete {
         /// 是否为 Delete:Block（Phase 3）
         block: bool,
+        /// 行号范围定位（Phase 5）
+        line_range: Option<crate::model::LineRange>,
         /// 用于匹配的删除内容（非 Block 时有内容）
         content: Option<DeleteContent>,
+    },
+    /// Raw 命令：字面量内容（Phase 5）
+    Raw {
+        /// 字面量内容
+        content: String,
     },
     /// Off 命令：关闭当前作用域
     Off {
@@ -102,12 +111,14 @@ impl Parser {
                 }
                 Token::Location {
                     block,
+                    line_range,
                     lines,
                     line: _,
                 } => {
                     let location_content = build_location_content(lines);
                     commands.push(Command::Location {
                         block,
+                        line_range,
                         content: location_content,
                     });
                     last_was_location = true;
@@ -118,6 +129,40 @@ impl Parser {
                     // 后续的 New/Delete 再也不知道在何处操作
                     last_was_location = false;
                     last_location_was_block = false;
+                }
+                Token::Raw { content, line } => {
+                    // Raw 命令将其内容作为字面量融入上一个 New/Delete 命令
+                    let last = commands.last_mut();
+                    match last {
+                        Some(Command::New {
+                            content: new_content,
+                            ..
+                        }) => {
+                            new_content.lines.push(NewLine {
+                                diff_taps: 0,
+                                content,
+                                is_raw: true,
+                            });
+                        }
+                        Some(Command::Delete {
+                            content: Some(del_content),
+                            ..
+                        }) => {
+                            del_content.lines.push(DeleteLine {
+                                content,
+                                is_raw: true,
+                            });
+                        }
+                        Some(Command::Delete { content: None, .. }) => {
+                            // Delete:Block 不需要 Raw 内容
+                        }
+                        _ => {
+                            return Err(ParseError::UnknownCommand {
+                                token: "Raw (无上下文)".to_string(),
+                                line,
+                            });
+                        }
+                    }
                 }
                 Token::New {
                     position,
@@ -149,7 +194,12 @@ impl Parser {
                         content: new_content,
                     });
                 }
-                Token::Delete { block, lines, line } => {
+                Token::Delete {
+                    block,
+                    line_range,
+                    lines,
+                    line,
+                } => {
                     if !last_was_location {
                         return Err(ParseError::MissingLocation {
                             command: "Delete".to_string(),
@@ -163,6 +213,7 @@ impl Parser {
                     let delete_content = build_delete_content(lines);
                     commands.push(Command::Delete {
                         block,
+                        line_range,
                         content: Some(delete_content),
                     });
                 }
@@ -287,11 +338,12 @@ mod tests {
             }],
         };
         let command = Command::Location {
+            line_range: None,
             block: false,
             content,
         };
         match command {
-            Command::Location { block, content } => {
+            Command::Location { block, content, .. } => {
                 assert!(!block);
                 assert_eq!(content.lines.len(), 1);
             }
@@ -365,6 +417,7 @@ mod tests {
     #[test]
     fn test_parse_location_with_content() {
         let tokens = vec![Token::Location {
+            line_range: None,
             block: false,
             lines: vec!["fn main() {".to_string(), "    let x = 1;".to_string()],
             line: LineNumber::new(2),
@@ -386,6 +439,7 @@ mod tests {
     #[test]
     fn test_parse_location_calculates_diff_taps() {
         let tokens = vec![Token::Location {
+            line_range: None,
             block: false,
             lines: vec![
                 "fn main() {".to_string(),
@@ -408,6 +462,7 @@ mod tests {
     #[test]
     fn test_parse_location_diff_taps_relative_to_first_line() {
         let tokens = vec![Token::Location {
+            line_range: None,
             block: false,
             lines: vec![
                 "        deep indent".to_string(),
@@ -435,6 +490,7 @@ mod tests {
                 line: LineNumber::new(1),
             },
             Token::Location {
+                line_range: None,
                 block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: LineNumber::new(2),
@@ -495,6 +551,7 @@ mod tests {
     fn test_parse_new_normal() {
         let tokens = vec![
             Token::Location {
+                line_range: None,
                 block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: LineNumber::new(2),
@@ -560,6 +617,7 @@ mod tests {
     fn test_parse_new_content_calculates_diff_taps() {
         let tokens = vec![
             Token::Location {
+                line_range: None,
                 block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: LineNumber::new(2),
@@ -597,11 +655,13 @@ mod tests {
     fn test_parse_delete() {
         let tokens = vec![
             Token::Location {
+                line_range: None,
                 block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: LineNumber::new(2),
             },
             Token::Delete {
+                line_range: None,
                 block: false,
                 lines: vec!["    let x = 1;".to_string()],
                 line: LineNumber::new(4),
@@ -610,7 +670,7 @@ mod tests {
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 2);
         match &commands[1] {
-            Command::Delete { block, content } => {
+            Command::Delete { block, content, .. } => {
                 assert!(!block);
                 assert!(content.is_some());
                 let del_content = content.as_ref().unwrap();
@@ -625,11 +685,13 @@ mod tests {
     fn test_parse_delete_multiple_lines() {
         let tokens = vec![
             Token::Location {
+                line_range: None,
                 block: false,
                 lines: vec!["fn main() {".to_string()],
                 line: LineNumber::new(2),
             },
             Token::Delete {
+                line_range: None,
                 block: false,
                 lines: vec!["line1".to_string(), "line2".to_string()],
                 line: LineNumber::new(5),
@@ -681,6 +743,7 @@ mod tests {
                 line: LineNumber::new(1),
             },
             Token::Location {
+                line_range: None,
                 block: true,
                 lines: vec!["fn example() {".to_string()],
                 line: LineNumber::new(2),
@@ -689,7 +752,7 @@ mod tests {
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 2);
         match &commands[1] {
-            Command::Location { block, content } => {
+            Command::Location { block, content, .. } => {
                 assert!(block, "Location:Block should set block=true");
                 assert_eq!(content.lines.len(), 1);
                 assert_eq!(content.lines[0].content, "fn example() {");
@@ -706,11 +769,13 @@ mod tests {
                 line: LineNumber::new(1),
             },
             Token::Location {
+                line_range: None,
                 block: true,
                 lines: vec!["fn example() {".to_string()],
                 line: LineNumber::new(2),
             },
             Token::Delete {
+                line_range: None,
                 block: true,
                 lines: vec![],
                 line: LineNumber::new(3),
@@ -719,7 +784,7 @@ mod tests {
         let commands = Parser::parse(tokens).unwrap();
         assert_eq!(commands.len(), 3);
         match &commands[2] {
-            Command::Delete { block, content } => {
+            Command::Delete { block, content, .. } => {
                 assert!(block, "Delete:Block should set block=true");
                 assert!(content.is_some());
             }
@@ -736,11 +801,13 @@ mod tests {
                 line: LineNumber::new(1),
             },
             Token::Location {
+                line_range: None,
                 block: false,
                 lines: vec!["fn example() {".to_string()],
                 line: LineNumber::new(2),
             },
             Token::Delete {
+                line_range: None,
                 block: true,
                 lines: vec![],
                 line: LineNumber::new(3),
@@ -759,6 +826,7 @@ mod tests {
     #[test]
     fn test_parse_location_normal_has_block_false() {
         let tokens = vec![Token::Location {
+            line_range: None,
             block: false,
             lines: vec!["fn main() {".to_string()],
             line: LineNumber::new(1),
@@ -770,5 +838,170 @@ mod tests {
             }
             _ => panic!("Expected Location"),
         }
+    }
+
+    // ============================================================
+    // Phase 5: 行号 Location/Delete 解析测试
+    // ============================================================
+
+    #[test]
+    fn test_parse_location_with_line_range() {
+        let tokens = vec![Token::Location {
+            block: false,
+            line_range: Some(crate::model::LineRange { start: 5, end: 10 }),
+            lines: vec!["fn main() {".to_string()],
+            line: LineNumber::new(1),
+        }];
+        let commands = Parser::parse(tokens).unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::Location {
+                block,
+                line_range,
+                content,
+            } => {
+                assert!(!block);
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 5);
+                assert_eq!(range.end, 10);
+                assert_eq!(content.lines.len(), 1);
+            }
+            _ => panic!("Expected Location"),
+        }
+    }
+
+    #[test]
+    fn test_parse_location_line_range_no_content() {
+        let tokens = vec![Token::Location {
+            block: false,
+            line_range: Some(crate::model::LineRange { start: 1, end: 3 }),
+            lines: vec![],
+            line: LineNumber::new(2),
+        }];
+        let commands = Parser::parse(tokens).unwrap();
+        match &commands[0] {
+            Command::Location {
+                line_range,
+                content,
+                ..
+            } => {
+                assert!(line_range.is_some());
+                assert_eq!(content.lines.len(), 0);
+            }
+            _ => panic!("Expected Location"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_with_line_range() {
+        let tokens = vec![
+            Token::Location {
+                block: false,
+                line_range: None,
+                lines: vec!["fn main() {".to_string()],
+                line: LineNumber::new(2),
+            },
+            Token::Delete {
+                block: false,
+                line_range: Some(crate::model::LineRange { start: 3, end: 5 }),
+                lines: vec!["unused".to_string()],
+                line: LineNumber::new(3),
+            },
+        ];
+        let commands = Parser::parse(tokens).unwrap();
+        match &commands[1] {
+            Command::Delete {
+                block,
+                line_range,
+                content,
+            } => {
+                assert!(!block);
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 3);
+                assert_eq!(range.end, 5);
+                assert!(content.is_some());
+            }
+            _ => panic!("Expected Delete"),
+        }
+    }
+
+    #[test]
+    fn test_parse_raw_merged_into_new() {
+        let tokens = vec![
+            Token::Location {
+                block: false,
+                line_range: None,
+                lines: vec!["fn main() {".to_string()],
+                line: LineNumber::new(1),
+            },
+            Token::New {
+                position: "Normal".to_string(),
+                lines: vec!["    let x = 1;".to_string()],
+                line: LineNumber::new(2),
+            },
+            Token::Raw {
+                content: "...".to_string(),
+                line: LineNumber::new(3),
+            },
+        ];
+        let commands = Parser::parse(tokens).unwrap();
+        assert_eq!(commands.len(), 2);
+        // Raw 的行应该融入 New content
+        match &commands[1] {
+            Command::New { content, .. } => {
+                assert_eq!(content.lines.len(), 2);
+                assert_eq!(content.lines[0].content, "let x = 1;");
+                assert!(!content.lines[0].is_raw);
+                assert_eq!(content.lines[1].content, "...");
+                assert!(content.lines[1].is_raw);
+            }
+            _ => panic!("Expected New"),
+        }
+    }
+
+    #[test]
+    fn test_parse_raw_merged_into_delete() {
+        let tokens = vec![
+            Token::Location {
+                block: false,
+                line_range: None,
+                lines: vec!["fn main() {".to_string()],
+                line: LineNumber::new(1),
+            },
+            Token::Delete {
+                block: false,
+                line_range: None,
+                lines: vec!["    old();".to_string()],
+                line: LineNumber::new(2),
+            },
+            Token::Raw {
+                content: "...".to_string(),
+                line: LineNumber::new(3),
+            },
+        ];
+        let commands = Parser::parse(tokens).unwrap();
+        match &commands[1] {
+            Command::Delete { content, .. } => {
+                let del = content.as_ref().unwrap();
+                assert_eq!(del.lines.len(), 2);
+                assert_eq!(del.lines[0].content, "    old();");
+                assert!(!del.lines[0].is_raw);
+                assert_eq!(del.lines[1].content, "...");
+                assert!(del.lines[1].is_raw);
+            }
+            _ => panic!("Expected Delete"),
+        }
+    }
+
+    #[test]
+    fn test_parse_raw_without_context_errors() {
+        let tokens = vec![Token::Raw {
+            content: "...".to_string(),
+            line: LineNumber::new(1),
+        }];
+        let result = Parser::parse(tokens);
+        assert!(result.is_err());
     }
 }

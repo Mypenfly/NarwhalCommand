@@ -257,28 +257,43 @@ cargo test engine::tests::test_nested_three_level_method_match_arm
 
 ---
 
-## Phase 5: 行号 Location（`@66,120`）+ Raw 命令
+## Phase 5: 行号 Location（`@66,120`）+ Raw 命令 ✅ 已完成
 
 **目标**：按行号直接定位，跳过匹配流程；支持 `...` 字面量写入。
 
 ### 5.1 行号 Location
 
-- [ ] parser：识别 `//!@Location:@66,120` 格式，解析行号范围
+- [x] parser：识别 `//!@Location:@66,120` 格式，解析行号范围
   - 支持单行：`@66`
   - 支持范围：`@66,120`
   - 验证 start > 0, end >= start
-- [ ] `model.rs`：`LineRange { start: usize, end: usize }`
-- [ ] engine：行号定位直接按索引截取，不经过 matcher
-- [ ] 行号搜索范围：顶层 = FileContent，嵌套 = 当前 ContentBlock（行号是相对于搜索范围的）
+- [x] `model.rs`：`LineRange { start: usize, end: usize }`
+- [x] engine：行号定位直接按索引截取，不经过 matcher
+- [x] 行号搜索范围：顶层 = FileContent，嵌套 = 当前 ContentBlock（行号是相对于搜索范围的）
 
 ### 5.2 Raw 命令
 
-- [ ] lexer：识别 `//!@Raw: ...`
-- [ ] `Command` 枚举新增：`Raw { content: String }`
-- [ ] parser：Raw Token 出现在 New/Delete 内容块中时融入对应行
-- [ ] `NewLine` 和 `DeleteLine` 增加 `is_raw: bool` 字段（字段已存在，值始终为 false）
-- [ ] New 插入时：is_raw 行直接写入 content，不计算缩进
-- [ ] Delete 匹配时：is_raw 行按字面量匹配
+- [x] lexer：识别 `//!@Raw: ...`
+- [x] `Command` 枚举新增：`Raw { content: String }`
+- [x] parser：Raw Token 出现在 New/Delete 内容块中时融入对应行
+- [x] `NewLine` 和 `DeleteLine` 增加 `is_raw: bool` 字段
+- [x] New 插入时：is_raw 行直接写入 content，不计算缩进
+- [x] Delete 匹配时：is_raw 行按字面量匹配
+
+### 5.3 行号 Delete（额外覆盖）
+
+- [x] lexer：识别 `//!@Delete:@start,end` 格式
+- [x] parser：Delete Token 携带 `line_range` 字段
+- [x] engine：有行号时跳过内容匹配，直接按行号范围删除
+- [x] 嵌套行号定位：行号相对于当前 Block
+
+### 验证
+
+```bash
+cargo test engine::tests::test_line_number_location
+cargo test engine::tests::test_raw_content_in_new_via_parser
+cargo test --test integration_test -- test_line_range
+```
 
 ### 实现建议
 
@@ -367,7 +382,7 @@ Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ✅ ──▶ Phas
                    │    Phase 6 ✅         │
                    │         │             │
                    │         ▼             │
-                   │    Phase 5 (可并行 Phase 3/4)
+                   │    Phase 5 ✅ (可并行 Phase 3/4)
                    │                       │
                    └───────────────────────┘
                                       │
@@ -388,25 +403,26 @@ Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ✅ ──▶ Phas
 ## 当前测试状态
 
 ```
-cargo test  → 191 passed, 0 failed
+cargo test  → 269 passed, 0 failed
 cargo clippy → 0 warnings
+cargo fmt    → 0 differences
 
 测试分布：
-  src/lib.rs 单元测试       158 个（含新增 14 个 Phase 4 测试）
-  src/main.rs 集成测试       4 个
-  tests/integration_test.rs  29 个
+  src/ 单元测试             225 个（所有模块）
+  src/main.rs 集成测试        4 个
+  tests/integration_test.rs  40 个（含 5 个 Phase 5 集成测试）
 ```
 
 ### 测试覆盖场景
 
 | 场景 | 测试数 | 说明 |
 |------|--------|------|
-| Lexer 词法分析 | 22 | Token 识别、内容提取、Separator、行号、修饰符 |
-| Parser 语法分析 | 22 | Command 构建、diff_taps 计算、歧义检测 |
-| Engine 执行引擎 | 41 | Open/Location/New/Delete/Off 全流程、嵌套 Location（Phase 4）、diff_lines |
-| Matcher 匹配算法 | 12 | 精确匹配、歧义报错、空行跳过、空 Location、Block scope 搜索 |
-| Model 数据结构 | 22 | Line/ContentBlock 操作、reindex、first_line_index、文件读写 |
+| Lexer 词法分析 | 32 | Token 识别、内容提取、Separator、行号、修饰符、Raw、Block |
+| Parser 语法分析 | 27 | Command 构建、diff_taps 计算、歧义检测、Raw 融入、行号传递 |
+| Engine 执行引擎 | 67 | Open/Location/New/Delete/Off 全流程、嵌套 Location、行号定位、行号 Delete、Raw 融入、diff_lines |
+| Matcher 匹配算法 | 20 | 精确匹配、歧义报错、空行跳过、空 Location、Block scope 搜索、行号范围 |
+| Model 数据结构 | 30 | Line/ContentBlock 操作、reindex、first_line_index、文件读写、LineRange |
 | Block 解析器 | 18 | 花括号/缩进检测、逐字符扫描、注释/字符串转义处理 |
-| Error 错误类型 | 8 | Display 格式化、错误信息完整性 |
+| Error 错误类型 | 9 | Display 格式化、错误信息完整性 |
 | Output 输出格式化 | 4 | 彩色/无色、行号、ContentBlock |
-| 集成测试 | 29 | 真实文件 New/Delete/Replace、Location:Block、嵌套操作、歧义检查 |
+| 集成测试 | 40 | 真实文件 New/Delete/Replace、Location:Block、嵌套操作、歧义检查、行号定位/Delete、多操作复合场景 |

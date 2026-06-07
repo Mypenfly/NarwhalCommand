@@ -13,7 +13,7 @@
 //!
 //! 详见 INSTRUCTION.md 第 1.1 节 "架构总览"
 
-use crate::model::LineNumber;
+use crate::model::{LineNumber, LineRange};
 
 /// 词法分析器产出的 Token
 #[derive(Debug, PartialEq)]
@@ -29,6 +29,8 @@ pub enum Token {
     Location {
         /// 是否为 Location:Block（Phase 3）
         block: bool,
+        /// 行号范围定位（Phase 5）：@start,end
+        line_range: Option<LineRange>,
         /// 定位内容的所有行（不含 `//!@` 前缀和 `...` 分隔符）
         lines: Vec<String>,
         /// Token 所在行号
@@ -47,6 +49,8 @@ pub enum Token {
     Delete {
         /// 是否为 Delete:Block（Phase 3）
         block: bool,
+        /// 行号范围定位（Phase 5）：@start,end
+        line_range: Option<LineRange>,
         /// 匹配内容的所有行（不含 `//!@` 前缀和 `...` 分隔符）
         lines: Vec<String>,
         /// Token 所在行号
@@ -61,6 +65,13 @@ pub enum Token {
     },
     /// 分隔符 `...`：终止上一个命令的内容提取
     Separator {
+        /// Token 所在行号
+        line: LineNumber,
+    },
+    /// Raw 命令：字面量内容（Phase 5）
+    Raw {
+        /// 字面量内容
+        content: String,
         /// Token 所在行号
         line: LineNumber,
     },
@@ -101,12 +112,12 @@ impl Lexer {
                 });
             } else if command_part.starts_with("Location:") {
                 let remaining = command_part.strip_prefix("Location:").unwrap_or("");
-                // Location:Block — Block 是修饰符而非内容
-                let is_block = remaining.trim() == "Block";
-                let content_remaining = if is_block { "" } else { remaining };
+                let (is_block, line_range, content_remaining) =
+                    Self::parse_block_and_range(remaining);
                 let content_lines = Self::extract_command_content(&mut lines, content_remaining);
                 tokens.push(Token::Location {
                     block: is_block,
+                    line_range,
                     lines: content_lines,
                     line: line_number,
                 });
@@ -142,13 +153,23 @@ impl Lexer {
                 });
             } else if command_part.starts_with("Delete:") {
                 let remaining = command_part.strip_prefix("Delete:").unwrap_or("");
-                // Delete:Block — Block 是修饰符而非内容（Phase 3）
-                let is_block = remaining.trim() == "Block";
-                let content_remaining = if is_block { "" } else { remaining };
+                let (is_block, line_range, content_remaining) =
+                    Self::parse_block_and_range(remaining);
                 let content_lines = Self::extract_command_content(&mut lines, content_remaining);
                 tokens.push(Token::Delete {
                     block: is_block,
+                    line_range,
                     lines: content_lines,
+                    line: line_number,
+                });
+            } else if command_part.starts_with("Raw:") {
+                let content_lines = Self::extract_command_content(
+                    &mut lines,
+                    command_part.strip_prefix("Raw:").unwrap_or(""),
+                );
+                let content = content_lines.join("\n");
+                tokens.push(Token::Raw {
+                    content,
                     line: line_number,
                 });
             } else if let Some(rest) = command_part.strip_prefix("Off:") {
@@ -190,6 +211,73 @@ impl Lexer {
         }
         content_lines
     }
+
+    /// 解析命令剩余文本中的 Block 修饰符和行号范围（Phase 5）
+    ///
+    /// 从 remaining 中识别：
+    /// - `Block` → is_block = true
+    /// - `@start,end` 或 `@start` → line_range
+    ///
+    /// 返回 (is_block, line_range, content_remaining)。
+    /// content_remaining 是去除修饰符和行号后剩余的内容。
+    fn parse_block_and_range(remaining: &str) -> (bool, Option<LineRange>, &str) {
+        let mut is_block = false;
+        let mut line_range: Option<LineRange> = None;
+        let original = remaining;
+        let trimmed = remaining.trim();
+        let lower = trimmed.to_lowercase();
+        let mut consumed = 0usize;
+
+        // 检测 Block 修饰符
+        if let Some(after_block) = trimmed.get(5..) {
+            if lower.starts_with("block")
+                && (after_block.starts_with(' ')
+                    || after_block.starts_with('@')
+                    || after_block.is_empty())
+            {
+                is_block = true;
+                consumed = 5;
+            }
+        } else if lower == "block" {
+            is_block = true;
+            consumed = 5;
+        }
+
+        let after_mod = trimmed[consumed..].trim_start();
+        let consumed_before_at = trimmed.len() - after_mod.len();
+        consumed = consumed_before_at;
+
+        // 检测 @行号 格式
+        if let Some(after_at) = after_mod.strip_prefix('@') {
+            // 跳过所有空白符后获取数字和逗号部分（去除内部空格）
+            let range_body = after_at.trim();
+            let range_str: String = range_body
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == ',' || c.is_whitespace())
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            if !range_str.is_empty() {
+                let full_range = format!("@{}", range_str);
+                if let Ok(range) = LineRange::parse(&full_range) {
+                    line_range = Some(range);
+                    // consumed 从原始字符串计算
+                    let raw_range_part: String = range_body
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == ',' || c.is_whitespace())
+                        .collect();
+                    let at_skip = after_at.len() - after_at.trim_start().len();
+                    consumed = consumed + "@".len() + at_skip + raw_range_part.len();
+                }
+            }
+        }
+
+        consumed = consumed.min(trimmed.len());
+        let prefix_spaces = original.len() - original.trim_start().len();
+        let pos_in_original = (prefix_spaces + consumed).min(original.len());
+        let content_remaining = &original[pos_in_original..];
+
+        (is_block, line_range, content_remaining)
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +306,7 @@ mod tests {
     #[test]
     fn test_token_location_creation() {
         let token = Token::Location {
+            line_range: None,
             block: false,
             lines: vec!["fn main() {".to_string(), "    let x = 1;".to_string()],
             line: LineNumber::new(3),
@@ -706,7 +795,9 @@ let y = 2;
         assert_eq!(tokens.len(), 2);
 
         match &tokens[0] {
-            Token::Location { block, lines, line } => {
+            Token::Location {
+                block, lines, line, ..
+            } => {
                 assert!(block, "Location:Block should have block=true");
                 assert_eq!(*line, 1);
                 assert_eq!(lines.len(), 1);
@@ -730,7 +821,9 @@ let y = 2;
         assert_eq!(tokens.len(), 2);
 
         match &tokens[0] {
-            Token::Delete { block, lines, line } => {
+            Token::Delete {
+                block, lines, line, ..
+            } => {
                 assert!(block, "Delete:Block should have block=true");
                 assert_eq!(*line, 1);
                 assert_eq!(lines.len(), 1);
@@ -770,6 +863,339 @@ let y = 2;
                 assert!(!block, "Normal Delete should have block=false");
             }
             _ => panic!("Expected Delete token"),
+        }
+    }
+
+    // ============================================================
+    // Phase 5: 行号 Location / Delete Token 测试
+    // ============================================================
+
+    #[test]
+    fn test_lexer_location_with_line_range_single() {
+        let script = "//!@Location:@10\nfn main() {\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Location {
+                block,
+                line_range,
+                lines,
+                line: _,
+            } => {
+                assert!(!block);
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 10);
+                assert_eq!(range.end, 10);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0], "fn main() {");
+            }
+            _ => panic!("Expected Location token"),
+        }
+
+        assert_eq!(
+            tokens[1],
+            Token::Separator {
+                line: LineNumber::new(3)
+            }
+        );
+    }
+
+    #[test]
+    fn test_lexer_location_with_line_range_pair() {
+        let script = "//!@Location:@66,120\nfn main() {\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Location {
+                block,
+                line_range,
+                lines,
+                line: _,
+            } => {
+                assert!(!block);
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 66);
+                assert_eq!(range.end, 120);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0], "fn main() {");
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_location_block_with_line_range() {
+        let script = "//!@Location:Block @66,120\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Location {
+                block,
+                line_range,
+                lines,
+                line: _,
+            } => {
+                assert!(block, "Should be Block");
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 66);
+                assert_eq!(range.end, 120);
+                assert_eq!(lines.len(), 0);
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_location_line_range_ignores_empty_content() {
+        let script = "//!@Location:@42\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Location {
+                line_range, lines, ..
+            } => {
+                assert!(line_range.is_some());
+                assert_eq!(line_range.unwrap().start, 42);
+                assert_eq!(lines.len(), 0);
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_delete_with_line_range() {
+        let script = "//!@Delete:@10,20\nlet x = 1;\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Delete {
+                block,
+                line_range,
+                lines,
+                line: _,
+            } => {
+                assert!(!block);
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 10);
+                assert_eq!(range.end, 20);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0], "let x = 1;");
+            }
+            _ => panic!("Expected Delete token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_delete_block_with_line_range() {
+        let script = "//!@Delete:Block @5,15\n...\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Delete {
+                block,
+                line_range,
+                lines,
+                line: _,
+            } => {
+                assert!(block, "Should be Block");
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 5);
+                assert_eq!(range.end, 15);
+                assert_eq!(lines.len(), 0);
+            }
+            _ => panic!("Expected Delete token"),
+        }
+    }
+
+    // ============================================================
+    // Phase 5: Raw Token 测试
+    // ============================================================
+
+    #[test]
+    fn test_lexer_raw_token() {
+        let script = "//!@Raw: ...\n//!@Off:Open\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Raw { content, line } => {
+                assert_eq!(content, "...");
+                assert_eq!(*line, 1);
+            }
+            _ => panic!("Expected Raw token"),
+        }
+
+        assert_eq!(
+            tokens[1],
+            Token::Off {
+                target: "Open".to_string(),
+                line: LineNumber::new(2),
+            }
+        );
+    }
+
+    #[test]
+    fn test_lexer_raw_token_multiline_content() {
+        let script = "//!@Raw:\nliteral content line\n//!@Off:Open\n";
+        let tokens = Lexer::tokenize(script);
+        assert_eq!(tokens.len(), 2);
+
+        match &tokens[0] {
+            Token::Raw { content, line: _ } => {
+                assert_eq!(content, "literal content line");
+            }
+            _ => panic!("Expected Raw token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_raw_between_new_and_separator() {
+        let script = "//!@New:\n    let x = 1;\n//!@Raw: ...\n...\n//!@Off:Open\n";
+        let tokens = Lexer::tokenize(script);
+        // Expected: New token, Raw token, Separator, Off token
+        assert_eq!(tokens.len(), 4);
+
+        assert!(matches!(tokens[0], Token::New { .. }));
+        assert!(matches!(tokens[1], Token::Raw { .. }));
+        assert!(matches!(tokens[2], Token::Separator { .. }));
+    }
+
+    // ============================================================
+    // Phase 5: 行号解析多样边界测试
+    // ============================================================
+
+    #[test]
+    fn test_lexer_location_line_range_with_spaces() {
+        let script = "//!@Location: @ 5 , 10\ncontent line\n...\n";
+        let tokens = Lexer::tokenize(script);
+        match &tokens[0] {
+            Token::Location {
+                line_range, lines, ..
+            } => {
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 5);
+                assert_eq!(range.end, 10);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0], "content line");
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_location_block_before_at_line_range() {
+        let script = "//!@Location:Block @3,7\nfn foo() {}\n...\n";
+        let tokens = Lexer::tokenize(script);
+        match &tokens[0] {
+            Token::Location {
+                block,
+                line_range,
+                lines,
+                ..
+            } => {
+                assert!(block, "Block should be true");
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 3);
+                assert_eq!(range.end, 7);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0], "fn foo() {}");
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_location_line_range_no_content() {
+        let script = "//!@Location:@1,5\n//!@Off:Location\n";
+        let tokens = Lexer::tokenize(script);
+        match &tokens[0] {
+            Token::Location {
+                line_range, lines, ..
+            } => {
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 1);
+                assert_eq!(range.end, 5);
+                assert_eq!(lines.len(), 0);
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_delete_line_range_no_content() {
+        let script = "//!@Delete:@2,4\n//!@Off:Location\n";
+        let tokens = Lexer::tokenize(script);
+        match &tokens[0] {
+            Token::Delete {
+                line_range, lines, ..
+            } => {
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 2);
+                assert_eq!(range.end, 4);
+                assert_eq!(lines.len(), 0);
+            }
+            _ => panic!("Expected Delete token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_location_block_at_with_spaces() {
+        let script = "//!@Location: Block @ 7\n...\n";
+        let tokens = Lexer::tokenize(script);
+        match &tokens[0] {
+            Token::Location {
+                block,
+                line_range,
+                lines,
+                ..
+            } => {
+                assert!(block, "Block should be true");
+                assert!(line_range.is_some());
+                let range = line_range.unwrap();
+                assert_eq!(range.start, 7);
+                assert_eq!(range.end, 7);
+                assert_eq!(lines.len(), 0);
+            }
+            _ => panic!("Expected Location token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_raw_token_empty_content() {
+        let script = "//!@Raw:\n//!@Off:Open\n";
+        let tokens = Lexer::tokenize(script);
+        match &tokens[0] {
+            Token::Raw { content, .. } => {
+                assert_eq!(content, "");
+            }
+            _ => panic!("Expected Raw token"),
+        }
+    }
+
+    #[test]
+    fn test_lexer_raw_token_multiple_lines() {
+        let script = "//!@Raw:\nline one\nline two\n//!@Off:Open\n";
+        let tokens = Lexer::tokenize(script);
+        match &tokens[0] {
+            Token::Raw { content, .. } => {
+                assert_eq!(content, "line one\nline two");
+            }
+            _ => panic!("Expected Raw token"),
         }
     }
 }

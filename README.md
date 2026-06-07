@@ -88,6 +88,19 @@ impl RequestProcessor {
 //!@Off:Open
 ```
 
+### 按行号精确定位
+
+```ned
+//!@Open: src/main.rs
+//!@Location:@42,58
+//!@Delete:@3,5
+//!@New:
+    log::info!("processing");
+    validate_input()?;
+//!@Off:Location
+//!@Off:Open
+```
+
 ### 删除整个函数并替换（Rust）
 
 ```ned
@@ -111,12 +124,15 @@ fn new_parser(input: &str) -> ParseResult {
 |------|------|
 | `Open:` | 打开目标文件 |
 | `Location:` | 定位代码位置（支持嵌套，逐级缩小范围） |
+| `Location:@行号` | 按行号直接定位，跳过匹配流程 |
 | `Location:Block` | 定位完整代码块 |
 | `New:` | 在定位位置后插入 |
-| `New:Start` | 在文件开头插入 |
-| `New:End` | 在文件末尾追加 |
+| `New:Start` | 在文件/Block 开头插入 |
+| `New:End` | 在文件/Block 末尾追加 |
 | `Delete:` | 删除匹配的连续行 |
+| `Delete:@行号` | 按行号直接删除 |
 | `Delete:Block` | 删除整个代码块 |
+| `Raw:` | 字面量内容（解决 `...` 二义性） |
 | `Off:Open` / `Off:Location` / `Off:New` | 关闭作用域 |
 
 > 完整语法和错误处理见 [docs/grammar.md](docs/grammar.md)
@@ -128,7 +144,7 @@ Phase 1: Open / Location / Off        ✅ 已完成
 Phase 2: New / Delete                 ✅ 已完成
 Phase 3: Location:Block / Delete:Block ✅ 已完成
 Phase 4: 嵌套 Location                 ✅ 已完成
-Phase 5: 行号定位 + Raw 命令          待实现
+Phase 5: 行号定位 + Raw 命令           ✅ 已完成
 Phase 6: 错误美化 / 彩色输出           ✅ 已完成
 Phase 7: 扩展命令（Include 等）        待实现
 ```
@@ -146,7 +162,7 @@ Phase 7: 扩展命令（Include 等）        待实现
 
 ```bash
 cargo build              # 构建
-cargo test               # 191 个测试
+cargo test               # ~270 个测试
 cargo fmt --check        # 格式检查
 cargo clippy -- -D warnings  # Lint
 
@@ -160,17 +176,17 @@ cargo nextest run        # 更快运行测试
 ```
 src/
   main.rs      # CLI 入口
-  lexer.rs     # 词法分析：//!@ 识别 → Token 流
+  lexer.rs     # 词法分析：//!@ 识别 → Token 流（含 @行号 和 Raw）
   parser.rs    # 语法分析：Token → Command AST
-  engine.rs    # 执行引擎：状态机，逐条执行命令（含嵌套 Location）
-  matcher.rs   # 核心匹配算法（含 SearchScope 抽象）
-  block.rs     # Block 解析（花括号/缩进，Phase 3/4 共用）
-  model.rs     # 数据结构定义
+  engine.rs    # 执行引擎：状态机，逐条执行命令（含行号/嵌套 Location）
+  matcher.rs   # 核心匹配算法（含 SearchScope 抽象 + 行号直取）
+  block.rs     # Block 解析（花括号/缩进）
+  model.rs     # 数据结构定义（含 LineRange、LineNumber newtype）
   error.rs     # 错误类型集中定义
   output.rs    # 彩色终端输出
 tests/
-  data/        # 测试用真实源码（Rust/Python/Markdown）
-  scripts/     # .ned 测试脚本
+  data/        # 测试用真实源码（Rust/Python/YAML/Markdown）
+  scripts/     # .ned 测试脚本（含行号定位和多操作复合场景）
 docs/
   grammar.md   # .ned 语法手册
   phases.md    # 实现阶段拆分

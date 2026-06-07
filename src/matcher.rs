@@ -74,6 +74,84 @@ impl LocationMatcher {
         let filtered = filter_by_full_match(scope, candidates, location);
         expect_single_match(scope, filtered, location, block)
     }
+
+    /// 按行号范围直接定位，跳过匹配流程（Phase 5）
+    ///
+    /// 行号相对于 SearchScope（顶层为 FileContent，嵌套为 ContentBlock）。
+    /// `is_delete` 标识是否来自 Delete 命令（此时不设置 match_info）。
+    pub fn find_by_line_range(
+        scope: &SearchScope,
+        line_range: crate::model::LineRange,
+        block: bool,
+        is_delete: bool,
+    ) -> Result<ContentBlock, MatchError> {
+        let scoped_lines = scope.lines();
+        let start_index = line_range.start.saturating_sub(1);
+        let end_index =
+            (line_range.end.saturating_sub(1)).min(scoped_lines.len().saturating_sub(1));
+
+        if start_index >= scoped_lines.len() {
+            return Err(MatchError::NoMatch {
+                location_content: format!(
+                    "行号 {} 超出范围（共 {} 行）",
+                    line_range.start,
+                    scoped_lines.len()
+                ),
+            });
+        }
+
+        if end_index < start_index {
+            return Err(MatchError::NoMatch {
+                location_content: format!(
+                    "无效的行号范围: @{},{}",
+                    line_range.start, line_range.end
+                ),
+            });
+        }
+
+        let (block_start, block_end) = if block {
+            BlockParser::parse_block(scope, start_index)?
+        } else {
+            (start_index, end_index)
+        };
+
+        let start_line = scoped_lines[block_start].line_num;
+        let end_line = scoped_lines[block_end].line_num;
+        let lines: Vec<Line> = scoped_lines[block_start..=block_end]
+            .iter()
+            .map(|line| Line {
+                line_num: line.line_num,
+                taps: line.taps,
+                diff_taps: line.diff_taps,
+                content: line.content.clone(),
+                stripped_content: line.stripped_content.clone(),
+            })
+            .collect();
+
+        let matched_line_count = if is_delete {
+            0
+        } else if block {
+            lines.len()
+        } else {
+            end_index - start_index + 1
+        };
+
+        let match_info = if matched_line_count == 0 {
+            MatchInfo::Empty
+        } else {
+            MatchInfo::Location { matched_line_count }
+        };
+
+        let mut content_block = ContentBlock {
+            start_line,
+            end_line,
+            lines,
+            first_line_index: HashMap::new(),
+            match_info,
+        };
+        content_block.reindex();
+        Ok(content_block)
+    }
 }
 
 /// 收集首行匹配的所有候选起点
@@ -604,5 +682,137 @@ mod tests {
             }
             _ => panic!("Expected TooManyMatches"),
         }
+    }
+
+    // ============================================================
+    // Phase 5: find_by_line_range 测试
+    // ============================================================
+
+    #[test]
+    fn test_find_by_line_range_single_line() {
+        let file = make_file_content(&["line1", "line2", "line3", "line4"]);
+        let scope = SearchScope::File(&file);
+        let line_range = crate::model::LineRange { start: 2, end: 2 };
+
+        let result = LocationMatcher::find_by_line_range(&scope, line_range, false, false);
+        assert!(result.is_ok());
+        let block = result.unwrap();
+        assert_eq!(block.start_line, 2);
+        assert_eq!(block.end_line, 2);
+        assert_eq!(block.lines.len(), 1);
+        assert_eq!(block.lines[0].content, "line2");
+    }
+
+    #[test]
+    fn test_find_by_line_range_multi_line() {
+        let file = make_file_content(&["a", "b", "c", "d", "e"]);
+        let scope = SearchScope::File(&file);
+        let line_range = crate::model::LineRange { start: 2, end: 4 };
+
+        let result = LocationMatcher::find_by_line_range(&scope, line_range, false, false);
+        assert!(result.is_ok());
+        let block = result.unwrap();
+        assert_eq!(block.start_line, 2);
+        assert_eq!(block.end_line, 4);
+        assert_eq!(block.lines.len(), 3);
+        assert_eq!(block.lines[0].content, "b");
+        assert_eq!(block.lines[1].content, "c");
+        assert_eq!(block.lines[2].content, "d");
+        // match_info should be Location with matched_line_count = 3
+        match block.match_info {
+            MatchInfo::Location { matched_line_count } => {
+                assert_eq!(matched_line_count, 3);
+            }
+            _ => panic!("Expected Location match_info"),
+        }
+    }
+
+    #[test]
+    fn test_find_by_line_range_is_delete_sets_empty_match_info() {
+        let file = make_file_content(&["a", "b", "c"]);
+        let scope = SearchScope::File(&file);
+        let line_range = crate::model::LineRange { start: 1, end: 3 };
+
+        let result = LocationMatcher::find_by_line_range(&scope, line_range, false, true);
+        assert!(result.is_ok());
+        let block = result.unwrap();
+        assert_eq!(block.match_info, MatchInfo::Empty);
+    }
+
+    #[test]
+    fn test_find_by_line_range_with_block_brace() {
+        let file = make_file_content(&[
+            "// header",
+            "fn main() {",
+            "    let x = 1;",
+            "    println!(\"{}\", x);",
+            "}",
+            "// footer",
+        ]);
+        let scope = SearchScope::File(&file);
+        let line_range = crate::model::LineRange { start: 2, end: 2 };
+
+        let result = LocationMatcher::find_by_line_range(&scope, line_range, true, false);
+        assert!(result.is_ok());
+        let block = result.unwrap();
+        assert_eq!(block.start_line, 2);
+        assert_eq!(block.end_line, 5);
+        assert_eq!(block.lines.len(), 4);
+        assert_eq!(block.lines[0].content, "fn main() {");
+        assert_eq!(block.lines[3].content, "}");
+    }
+
+    #[test]
+    fn test_find_by_line_range_with_block_indent() {
+        let file = make_file_content(&[
+            "def outer():",
+            "    def inner():",
+            "        pass",
+            "    return 0",
+            "end_outer",
+        ]);
+        let scope = SearchScope::File(&file);
+        let line_range = crate::model::LineRange { start: 2, end: 2 };
+
+        let result = LocationMatcher::find_by_line_range(&scope, line_range, true, false);
+        assert!(result.is_ok());
+        let block = result.unwrap();
+        assert_eq!(block.start_line, 2);
+        assert_eq!(block.end_line, 3);
+        assert_eq!(block.lines.len(), 2);
+    }
+
+    #[test]
+    fn test_find_by_line_range_out_of_bounds() {
+        let file = make_file_content(&["a", "b"]);
+        let scope = SearchScope::File(&file);
+        let line_range = crate::model::LineRange { start: 10, end: 20 };
+
+        let result = LocationMatcher::find_by_line_range(&scope, line_range, false, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_by_line_range_within_block_scope() {
+        let file = make_file_content(&[
+            "fn outer() {",
+            "    let x = 1;",
+            "    let y = 2;",
+            "    let z = 3;",
+            "}",
+        ]);
+        let block = make_block_scope(&file, 1, 5);
+        let scope = SearchScope::Block(&block);
+        // 行号相对 block scope: 第2行对应 "    let x = 1;"
+        let line_range = crate::model::LineRange { start: 2, end: 3 };
+
+        let result = LocationMatcher::find_by_line_range(&scope, line_range, false, false);
+        assert!(result.is_ok());
+        let found = result.unwrap();
+        // start_line 仍为绝对行号
+        assert_eq!(found.start_line, 2);
+        assert_eq!(found.lines.len(), 2);
+        assert_eq!(found.lines[0].content, "    let x = 1;");
+        assert_eq!(found.lines[1].content, "    let y = 2;");
     }
 }

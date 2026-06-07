@@ -407,6 +407,66 @@ impl<'a> SearchScope<'a> {
     }
 }
 
+// ============================================================
+// LineRange
+// ============================================================
+
+/// 行号范围，用于行号定位（Phase 5）
+///
+/// start 和 end 均为 1-based 行号，end >= start。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineRange {
+    /// 起始行号（1-based）
+    pub start: usize,
+    /// 结束行号（1-based），end >= start
+    pub end: usize,
+}
+
+impl LineRange {
+    /// 从字符串解析行号范围，例如 "@66,120" 或 "@66"
+    ///
+    /// 支持格式：
+    /// - `@66` → LineRange { start: 66, end: 66 }
+    /// - `@66,120` → LineRange { start: 66, end: 120 }
+    ///
+    /// 验证 start > 0, end >= start。
+    pub fn parse(input: &str) -> Result<Self, String> {
+        let nums = input.trim_start_matches('@').trim();
+        let parts: Vec<&str> = nums.split(',').collect();
+
+        match parts.len() {
+            1 => {
+                let start: usize = parts[0]
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("无效的行号: {}", parts[0]))?;
+                if start == 0 {
+                    return Err(format!("行号必须大于 0，实际值: {}", start));
+                }
+                Ok(LineRange { start, end: start })
+            }
+            2 => {
+                let start: usize = parts[0]
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("无效的起始行号: {}", parts[0]))?;
+                let end: usize = parts[1]
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("无效的结束行号: {}", parts[1]))?;
+                if start == 0 {
+                    return Err(format!("起始行号必须大于 0，实际值: {}", start));
+                }
+                if end < start {
+                    return Err(format!("结束行号 {} 不能小于起始行号 {}", end, start));
+                }
+                Ok(LineRange { start, end })
+            }
+            _ => Err(format!("无效的行号格式: {}", input)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,5 +959,56 @@ mod tests {
         };
         block.reindex();
         assert!(block.lines.is_empty());
+    }
+
+    // ============================================================
+    // LineRange 测试
+    // ============================================================
+
+    #[test]
+    fn test_line_range_parse_single_line() {
+        let range = LineRange::parse("@66").unwrap();
+        assert_eq!(range.start, 66);
+        assert_eq!(range.end, 66);
+    }
+
+    #[test]
+    fn test_line_range_parse_range() {
+        let range = LineRange::parse("@66,120").unwrap();
+        assert_eq!(range.start, 66);
+        assert_eq!(range.end, 120);
+    }
+
+    #[test]
+    fn test_line_range_parse_with_spaces() {
+        let range = LineRange::parse("@ 10 , 20 ").unwrap();
+        assert_eq!(range.start, 10);
+        assert_eq!(range.end, 20);
+    }
+
+    #[test]
+    fn test_line_range_parse_start_zero() {
+        let result = LineRange::parse("@0,10");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("大于 0"));
+    }
+
+    #[test]
+    fn test_line_range_parse_end_less_than_start() {
+        let result = LineRange::parse("@10,5");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("不能小于"));
+    }
+
+    #[test]
+    fn test_line_range_parse_invalid_format() {
+        let result = LineRange::parse("@10,20,30");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_line_range_parse_non_numeric() {
+        let result = LineRange::parse("@abc");
+        assert!(result.is_err());
     }
 }

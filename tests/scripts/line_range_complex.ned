@@ -1,0 +1,60 @@
+//!@Open: ./tests/data/rust_complex.rs
+
+// 场景 1：行号定位 @11,19 在 AppConfig struct 中添加 log_config 字段
+//!@Location:@11,19
+//!@New:
+    pub log_config: bool,
+//!@Off:Location
+
+// 场景 2：内容匹配定位测试函数，Delete + New 替换为扩展版本
+//!@Location:
+    #[test]
+    fn test_config_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.name, "myapp");
+    }
+//!@Delete:
+    #[test]
+    fn test_config_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.name, "myapp");
+    }
+//!@New:
+    #[test]
+    fn test_config_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.name, "myapp");
+        assert_eq!(config.version, "0.1.0");
+        assert!(!config.features.is_empty() || true);
+    }
+//!@Off:Location
+
+// 场景 3：内容匹配 + 嵌套行号定位 impl DataPipeline 内，插入 stage_count 方法
+//!@Location:
+impl DataPipeline {
+//!@Location:
+    pub fn execute(&self, input: &str) -> Result<String, String> {
+//!@New:Start
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
+    }
+
+//!@Off:Location
+//!@Off:Location
+
+// 场景 4：内容匹配 run_app + 嵌套定位替换 pipeline.execute 调用
+//!@Location:
+pub fn run_app(config: AppConfig) -> Result<(), String> {
+//!@Location:
+    let result = pipeline.execute("  test input  ")?;
+//!@Delete:
+    let result = pipeline.execute("  test input  ")?;
+//!@New:
+    let input = "  test input  ";
+    log::info!("running pipeline with input: {:?}", input);
+    let result = pipeline.execute(input)?;
+    log::info!("pipeline completed successfully");
+//!@Off:Location
+//!@Off:Location
+
+//!@Off:Open

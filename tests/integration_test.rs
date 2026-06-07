@@ -1323,3 +1323,331 @@ pub struct ConnectionPool {{
 
     check_indentation_consistency(&result).expect("Indentation check failed");
 }
+
+// ============================================================
+// Phase 5: 行号 Location / Delete 集成测试
+// ============================================================
+
+#[test]
+fn test_line_range_basic() {
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("line_range_basic.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "line_range_basic script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: 单行号 Location:@14 后插入 region 字段
+    assert!(
+        result.contains("pub region: String"),
+        "Should contain new region field"
+    );
+
+    // 验证 2: 内容匹配定位后插入 get_pool_size 方法
+    assert!(
+        result.contains("pub fn get_pool_size"),
+        "Should contain new get_pool_size method"
+    );
+    assert!(
+        result.contains("self.connections.len()"),
+        "Should contain get_pool_size body"
+    );
+
+    // 验证 3: 嵌套行号 Location 添加了 with_timeout 方法
+    assert!(
+        result.contains("pub fn with_timeout"),
+        "Should contain with_timeout method"
+    );
+    assert!(
+        result.contains("self.timeout_ms = ms"),
+        "Should contain with_timeout body"
+    );
+
+    // 验证原有内容未被破坏
+    assert!(result.contains("pub struct AppConfig"));
+    assert!(result.contains("pub struct ConnectionPool"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    assert!(
+        added.len() >= 5,
+        "Should have at least 5 Added lines, got {}",
+        added.len()
+    );
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_line_range_delete_and_replace() {
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("line_range_delete.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "line_range_delete script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: impl Default for AppConfig 已被行号范围删除
+    assert!(
+        !result.contains("impl Default for AppConfig"),
+        "impl Default for AppConfig should be deleted"
+    );
+
+    // 验证 2: Connection struct 新增了 pool_size 和 last_maintenance 字段
+    assert!(
+        result.contains("pool_size: usize"),
+        "Should contain new pool_size field"
+    );
+    assert!(
+        result.contains("last_maintenance: std::time::Instant"),
+        "Should contain new last_maintenance field"
+    );
+    // 验证原有字段仍然存在
+    assert!(result.contains("id: u64"));
+    assert!(result.contains("created_at:"));
+
+    // 验证 3: 原有内容仍在
+    assert!(result.contains("pub struct AppConfig"));
+    assert!(result.contains("impl ConnectionPool"));
+
+    // diff 同时包含 Added 和 Deleted
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(!added.is_empty(), "Should have Added diff lines");
+    assert!(!deleted.is_empty(), "Should have Deleted diff lines");
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_line_range_block_operations() {
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("line_range_block.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "line_range_block script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: Location:Block @75 定位到 get_connection，在其后插入 is_healthy
+    assert!(
+        result.contains("pub fn is_healthy"),
+        "Should contain new is_healthy method"
+    );
+    assert!(
+        result.contains("self.active > 0"),
+        "Should contain is_healthy body"
+    );
+
+    // 验证 2: Delete:Block 删除了原 impl AppConfig 的 validate 方法前内容
+    // 新方法 set_default_name 被添加
+    assert!(
+        result.contains("pub fn set_default_name"),
+        "Should contain set_default_name method"
+    );
+
+    // 验证 3: 嵌套 Location:Block + 行号定位 transform match 已扩展
+    assert!(
+        result.contains("TransformType::Capitalize"),
+        "Should contain new Capitalize transform variant"
+    );
+
+    // 验证原有内容
+    assert!(result.contains("pub fn get_connection"));
+    assert!(result.contains("impl AppConfig"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(!added.is_empty(), "Should have Added diff lines");
+    assert!(!deleted.is_empty(), "Should have Deleted diff lines");
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_line_range_complex_mixed() {
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("line_range_complex.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "line_range_complex script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: 行号定位 @11,19 后在 struct 中添加 log_config 字段
+    assert!(
+        result.contains("pub log_config: bool"),
+        "Should contain log_config field"
+    );
+
+    // 验证 2: 内容匹配 Location 定位测试函数，替换为扩展版本
+    assert!(
+        result.contains("assert_eq!(config.version, \"0.1.0\");"),
+        "Should contain extended test assertions"
+    );
+
+    // 验证 3: 嵌套行号定位在 impl DataPipeline 中添加 stage_count
+    assert!(
+        result.contains("pub fn stage_count"),
+        "Should contain stage_count method"
+    );
+    assert!(
+        result.contains("self.stages.len()"),
+        "Should contain stage_count body"
+    );
+
+    // 验证 4: 内容匹配 run_app，嵌套定位替换 pipeline.execute 调用
+    assert!(
+        result.contains("running pipeline with input:"),
+        "Should contain new pipeline logging"
+    );
+    assert!(
+        result.contains("pipeline completed successfully"),
+        "Should contain pipeline completion log"
+    );
+
+    // 原有内容仍在
+    assert!(result.contains("pub struct AppConfig"));
+    assert!(result.contains("impl DataPipeline"));
+    assert!(result.contains("pub fn run_app"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(
+        added.len() >= 4,
+        "Should have multiple Added lines, got {}",
+        added.len()
+    );
+    assert!(
+        deleted.len() >= 1,
+        "Should have Deleted lines, got {}",
+        deleted.len()
+    );
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
+
+#[test]
+fn test_multi_op_refactor() {
+    let env = TestEnv::from_data_file("rust_complex.rs");
+    let script = env.load_script("multi_op_refactor.ned");
+
+    let (engine, success) = execute_script(&script);
+    assert!(success, "multi_op_refactor script failed");
+
+    let result = env.read_target();
+
+    // 验证 1: impl Default for AppConfig 已被删除
+    assert!(
+        !result.contains("impl Default for AppConfig"),
+        "impl Default for AppConfig should be deleted"
+    );
+
+    // 验证 2: 新字段已添加到 AppConfig struct
+    assert!(
+        result.contains("pub env_prefix: String"),
+        "Should contain env_prefix field"
+    );
+    assert!(
+        result.contains("pub health_check_path: String"),
+        "Should contain health_check_path field"
+    );
+
+    // 验证 3: validate 方法开头有 log::debug
+    assert!(
+        result.contains("validating config:"),
+        "Should contain debug log in validate"
+    );
+
+    // 验证 4: with_env_prefix 方法已添加
+    assert!(
+        result.contains("pub fn with_env_prefix"),
+        "Should contain with_env_prefix method"
+    );
+
+    // 验证 5: ConnectionPool 中新增 shutdown 方法
+    assert!(
+        result.contains("pub fn shutdown"),
+        "Should contain shutdown method"
+    );
+    assert!(
+        result.contains("self.connections.clear();"),
+        "Should contain shutdown body"
+    );
+
+    // 验证 6: run_app 中新增日志
+    assert!(
+        result.contains("application starting with config:"),
+        "Should contain application start log"
+    );
+
+    // 验证 7: 测试模块末尾有新测试函数
+    assert!(
+        result.contains("fn test_connection_pool_shutdown()"),
+        "Should contain new test function"
+    );
+    assert!(
+        result.contains("pool.shutdown();"),
+        "Should contain test body"
+    );
+
+    // 验证原有内容完整
+    assert!(result.contains("pub struct AppConfig"));
+    assert!(result.contains("impl AppConfig"));
+    assert!(result.contains("impl ConnectionPool"));
+    assert!(result.contains("pub fn run_app"));
+    assert!(result.contains("fn test_config_default()"));
+    assert!(result.contains("fn test_pipeline_basic()"));
+
+    let added: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Added)
+        .collect();
+    let deleted: Vec<_> = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == n_edit::output::DiffLineKind::Deleted)
+        .collect();
+    assert!(
+        added.len() >= 8,
+        "Should have many Added lines, got {}",
+        added.len()
+    );
+    assert!(
+        deleted.len() >= 8,
+        "Should have many Deleted lines, got {}",
+        deleted.len()
+    );
+
+    check_indentation_consistency(&result).expect("Indentation check failed");
+}
