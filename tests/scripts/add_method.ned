@@ -1,0 +1,14 @@
+//!@Open: ./tests/data/config.rs
+//!@Location:
+impl AppConfig {
+//!@New:
+    /// Reload configuration from file and environment.
+    ///
+    /// Merges values: environment variables take precedence over file values.
+    pub fn reload(&mut self) -> Result<(), String> {
+        let env_config = AppConfig::from_env();
+        *self = env_config;
+        Ok(())
+    }
+...
+//!@Off:Open

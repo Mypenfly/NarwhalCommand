@@ -1,0 +1,8 @@
+//!@Open: ./tests/data/config.rs
+//!@Location:
+    /// Minimum password length for user accounts
+//!@New:
+    /// Log level filter (trace, debug, info, warn, error)
+    pub log_level: String,
+...
+//!@Off:Open

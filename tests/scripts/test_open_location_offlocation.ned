@@ -1,0 +1,7 @@
+//!@Open: ./tests/data/sample.rs
+//!@Location:
+fn process_items(items: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+...
+//!@Off:Location
+//!@Off:Open

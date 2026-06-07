@@ -1,0 +1,20 @@
+//!@Open: ./tests/data/config.rs
+//!@Location:
+/// Minimum password length for user accounts
+//!@New:
+    /// Log level filter (trace, debug, info, warn, error)
+    pub log_level: String,
+...
+//!@Off:Location
+//!@Location:
+impl AppConfig {
+//!@New:
+    /// Reload configuration from file and environment.
+    pub fn reload(&mut self) -> Result<(), String> {
+        let env_config = AppConfig::from_env();
+        *self = env_config;
+        Ok(())
+    }
+...
+//!@Off:Location
+//!@Off:Open
