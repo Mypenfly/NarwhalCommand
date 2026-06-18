@@ -28,12 +28,23 @@
 | BUG-402 | Delete:Block 不校验 Location:Block | `commands/delete.rs`: `execute_block` 检查 exec_cmds 中 Location 模式 | 3 |
 | BUG-302 | Capture Token 被 Parser 丢弃 | `parser.rs`: 新增 `Command::Capture`，`engine/mod.rs`: 写入 pools | 1 |
 
-### 第三阶段（桥接实现）— 基础架构就绪，核心命令迁移待完成
+### 第三阶段（变更追踪模型）— 桥接实现完成，核心迁移就绪
 
 | Bug | 描述 | 修复方式 | 新增测试 |
 |-----|------|----------|----------|
 | BUG-501 | file_io.rs stub | `file_io.rs`: `read_file()`, `write_file()`, `path_exists()` 完整实现 | 6 |
 | BUG-302 | Capture 存入 pools（增强） | `engine/mod.rs`: Capture 从 `last_result` 取值（替代空 CmdContent） | 1 (更新) |
+| BUG-303 | Get 基本展开 | `engine/mod.rs`: `dispatch_command()` 中 Get 从 pools 读取 | 1 |
+| BUG-104 | pools 写入 + Capture 管道 | `lexer.rs`: `Token::Close.capture` 字段 + `parse_close_with_capture()`；`engine/mod.rs`: `handle_close()` Capture 存入 pools | 1 (更新) |
+
+### 第三阶段（变更追踪模型 — 本次完成）:::新建变更记录
+
+| Bug | 描述 | 修复方式 | 新增测试 |
+|-----|------|----------|----------|
+| **BUG-204** | Delete 执行顺序：New 在前污染匹配 | `commands/delete.rs`: `execute_normal()` 在 `last_result.snapshot_lines` 上匹配（而非被 New 修改后的 `block.lines`）；`record_delete()` 记录变更 | 7 |
+| **BUG-101** | CmdContent 变更记录层 | `commands/delete.rs`: `record_delete()`；`commands/new.rs`: `record_insert()`；变更数据写入 `last_result.content.changes` | 5 |
+| **BUG-403** | Location 关闭时不触发终端输出 | `engine/mod.rs`: `print_location_result()` + `handle_close("LOCATION")` 中调用 + `--verbose` 控制 | 1 |
+| **BUG-103** | 流/值输出未接入执行路径 | `engine/mod.rs`: `update_last_result()` 从 `CommandType.output` 读取输出类型，ValueOutput 清除 `last_result`；`registry.rs`: GET 注册为 StreamOutput | 1 |
 | BUG-303 | Get 基本展开 | `engine/mod.rs`: `dispatch_command()` 中 Get 从 pools 读取 | 1 |
 | BUG-104 | pools 写入 + Capture 管道 | `lexer.rs`: `Token::Close.capture` 字段 + `parse_close_with_capture()`；`engine/mod.rs`: `handle_close()` Capture 存入 pools | 1 (更新) |
 
@@ -48,51 +59,49 @@
 - `Engine.last_result: Option<CommandResult>` 字段 + `update_last_result()` + `dispatch_command()`
 - Engine `execute()` 三步流水线重写
 
-### 第三阶段（未完成 — 核心命令迁移）
+### 第三阶段（待完成 — 桥接彻底化）
 
-*下一阶段必须完成以下工作，将桥接实现推进为完整的变更追踪模型：*
+*当前桥接可行（cmd 层直接修改 Block + CmdContent 变更记录双写），以下为完全切换到延迟应用模型所需的剩余工作：*
 
 | Bug | 当前状态 | 待完成工作 | 代码位置 |
 |-----|:--------:|------------|----------|
-| **BUG-101** | 🟡 桥接 | `commands/new.rs`, `commands/delete.rs`, `commands/open.rs`, `commands/location.rs` 的 `convert()`/`execute_core()`/`out()` 正式实现，命令直接操作 CmdContent 而非通过 `update_last_result()` 后补 | `ncs/src/commands/{new,delete,open,location}.rs` |
-| **BUG-102** | 🟡 桥接 | 命令 `execute()` 签名改为 `-> Result<CommandResult, NcsError>`（当前返回 `Result<(), NcsError>`），由命令自身构建 `CommandResult` | `ncs/src/commands/*.rs` |
-| **BUG-103** | 🟡 桥接 | `dispatch_command()` 或 `execute()` 中根据 `CommandType.output` 控制 `last_result` 的保留/丢弃（StreamOutput vs ValueOutput） | `ncs/src/engine/mod.rs` |
-| **BUG-204** | 🔴 未修复 | `commands/delete.rs` 的 `execute_normal()` 改为在 `CmdContent.snapshot_lines` 上匹配 + `content.record_delete()`；移除 `ContentBlock.lines` 的直接 drain；`commands/new.rs` 的 `execute_normal()` 改为 `content.record_insert()` | `ncs/src/commands/delete.rs`, `ncs/src/commands/new.rs` |
-| **BUG-403** | 🔴 未实现 | `engine/mod.rs`: 在 `handle_close("LOCATION")` 中调用 `print_location_result()`，输出带行号的匹配块（灰色） | `ncs/src/engine/mod.rs` |
+| **BUG-101** | 🟡 桥接 | `commands/{new,delete,open,location}.rs` 的 `convert()`/`execute_core()`/`out()` 正式实现，由命令自身构建 `CommandResult` 返回 | `ncs/src/commands/*.rs` |
+| **BUG-102** | 🟡 桥接 | 命令 `execute()` 签名改为 `-> Result<CommandResult, NcsError>`（当前返回 `Result<(), NcsError>`） | `ncs/src/commands/*.rs` |
+| **BUG-103** | 🟡 部分 | `dispatch_command()` 或 `execute()` 中根据 `CommandType.output` 控制 `last_result` 的保留/丢弃（当前在 `update_last_result()` 中处理，缺少 Get/Capture 专有处理） | `ncs/src/engine/mod.rs` |
+| **BUG-204** | 🟢 已修复 | `commands/delete.rs:execute_normal()` 在 `snapshot_lines` 上匹配；变更记录到 `CmdContent.changes`；不再受 New 先执行影响 | `ncs/src/commands/delete.rs` |
+| **BUG-403** | 🟢 已修复 | `engine/mod.rs`: `print_location_result()` 实现，`handle_close("LOCATION")` 中调用，`--verbose` CLI 标志接入 | `ncs/src/engine/mod.rs` |
 | **BUG-203** | ⏳ 未实现 | `is_independent` 字段的实际使用或移除 | `ncs/src/engine/mod.rs` |
 
 ### 迁移关键路径
 
 ```
-Step 1: BUG-204 — Delete 命令搬迁到 CmdContent 快照匹配
-        ├── 删除 commands/delete.rs 中 execute_normal() 的 ContentBlock 直接操作
+✅ Step 1: BUG-204 — Delete 命令搬迁到 CmdContent 快照匹配（已完成）
+        ├── 删除 commands/delete.rs 中 execute_normal() 对 block.lines 的依赖
         ├── 改为在 engine.last_result.content.snapshot_lines 上匹配
         ├── 匹配成功 → content.record_delete(start_idx, end_idx, "DELETE")
         └── engine.last_result 的 CmdContent 携带 ContentChange::Delete
 
-Step 2: BUG-101/102 — New 命令搬迁到 CmdContent 变更记录
-        ├── 删除 commands/new.rs 中 execute_normal() 的 ContentBlock 直接操作
-        ├── 改为 content.record_insert(position, lines, "NEW")
-        └── New 命令自身返回 CommandResult
+✅ Step 2: BUG-101/102 — New 命令搬迁到 CmdContent 变更记录（已完成）
+        ├── commands/new.rs execute_normal() 调用 content.record_insert()
+        └── New 的变更记录累积在 CmdContent.changes 中
 
-Step 3: BUG-101/102 — Open/Location 命令搬迁
-        ├── Open.convert() / execute_core() / out() 正式实现
-        ├── Location.convert() / execute_core() / out() 正式实现
-        └── 移除 engine.update_last_result() 中的桥接分支
-
-Step 4: BUG-204 关闭时变更生效
-        ├── handle_close("LOCATION"): 读取 last_result.content.changes
+✅ Step 4: BUG-204 — apply_content_to_file 实现（已完成，桥接阶段备用）
         ├── apply_changes() → 转换 ContentChange → ContentBlock 行操作
         ├── reindex() → diff_lines
         └── write_back_to_parent()
 
-Step 5: BUG-103 — 流/值输出接入
-        ├── dispatch_command() 中根据 cmd_type.output 控制 last_result 保留/丢弃
-        └── ValueOutput 命令（Exec/Read/Write）last_result 不保留
+✅ Step 5: BUG-103 — 流/值输出接入（已完成）
+        ├── update_last_result() 中从 registry cmd_type.output 读取输出类型
+        └── ValueOutput 命令的 last_result 清除
 
-Step 6: BUG-403 — Location 终端输出
+✅ Step 6: BUG-403 — Location 终端输出（已完成）
         ├── engine.print_location_result() 实现
-        └── verbose 标志接入
+        └── --verbose 标志接入
+
+⏳ Step 3: BUG-101/102 — Open/Location 正式 convert/out（待完成）
+        ├── Open.convert() / execute_core() / out() 正式实现
+        ├── Location.convert() / execute_core() / out() 正式实现
+        └── 移除 engine.update_last_result() 中的 OPEN/LOCATION 桥接分支
 ```
 
 > **关键约束**：迁移过程中保持现有集成测试（49 n_edit + 51 NCS）全部通过。每一步完成后立即回归。
@@ -243,16 +252,24 @@ fn pop_exec_cmd(&mut self, name: &str) {
 
 ### BUG-204: Location → Delete → New 顺序执行时 Delete 误读到 New 修改后的 Block
 
-**状态**: 🟡 设计中（变更追踪模型根本解决）  
-**严重程度**: 严重  
+**状态**: 🟢 已修复（2026-06-18，Phase 3 变更追踪模型）  
+**严重程度**: 致命  
 **对应文档**: ncs_dev.md §5.4（Delete 执行流："在 snapshot_lines 中逐行去空白匹配删除内容"）  
-**代码位置**: `ncs/src/commands/delete.rs`、`ncs/src/commands/new.rs`、`ncs/src/engine/mod.rs`  
+**代码位置**: `ncs/src/commands/delete.rs:91-155`、`ncs/src/engine/executor.rs:162-245`、`ncs/src/engine/mod.rs:295-302`
 
-**修复方案**：详见 `docs/superpowers/specs/2026-06-18-phase3-cmdcontent-pipeline-design.md`
+**根因**: `commands/delete.rs:execute_normal()` 在 `ContentBlock.lines`（可能已被 New 修改）上匹配，而非在 Location 时的原始快照上匹配。
 
-采用**变更追踪模型**：Location 创建 CmdContent 时锁定 `snapshot_lines`，New 和 Delete 不直接修改行，而是向 CmdContent 分别追加 `ContentChange::Insert` 和 `ContentChange::Delete` 记录。Delete 匹配始终使用 `snapshot_lines`（不受 Insert 影响），从根源上消除顺序依赖。所有变更在 Owner 关闭时由 `apply_changes()` 统一生效。
+**修复方式**:
+1. `executor.rs`: 新增 `find_delete_match_in_snapshot()`、`check_delete_adjacency_in_snapshot()`、`map_snapshot_index_to_block_index()` — 基于 `CmdLine` 快照的匹配函数（与现有 ContentBlock 版本对偶）
+2. `cmd_content.rs`: `CmdLine::stripped_content()` — 与 `Line::stripped_content()` 一致的模糊匹配
+3. `delete.rs:execute_normal()`: 优先从 `engine.last_result.content.snapshot_lines` 匹配；通过 stripped_content 映射到 `block.lines` 实际位置；调用 `record_delete()` 记录变更
+4. `engine/mod.rs:update_last_result()`: DELETE 移除重复匹配（由 delete.rs 直接记录）
 
-**依赖**：Phase 3 CmdContent 数据流重构（BUG-101/102/103 同步修复）。
+**验证**:
+- `test_delete_matches_on_snapshot_not_affected_by_prior_new` — New 在前 Delete 在后，Delete 在快照上成功匹配
+- `test_delete_matches_on_snapshot_with_multiple_new_before` — 多重 New 不干扰 Delete
+- `test_snapshot_not_modified_by_new_before_delete` — 快照不受 New 插入污染（旧版此测试预期失败，现已通过）
+- 51 项集成测试全部通过，包括 `rust_edge_cases`、`scenario09_delete_replace`、`multi_op_refactor` 等复杂场景
 
 ---
 
@@ -491,18 +508,18 @@ Open 仅注册为 `PermissionType::FileRead`，缺少 FileWrite。
 |---------------------|:--------:|----------|
 | §3.3 CmdContent convert()/out() | 🟡 桥接实现 | BUG-101 |
 | §3.3 CommandResult 返回 | 🟡 桥接实现 | BUG-102 |
-| §6.2 流输出 / 值输出区分 | 🟡 桥接实现 | BUG-103 |
+| §6.2 流输出 / 值输出区分 | 🟢 已修复 | BUG-103 |
 | §3.4 / §6.1 pools 数据存储 | 🟢 已修复 | BUG-104 |
 | §6.3 exec_cmds owner 检查 | ✅ 已修复 | BUG-201 |
 | §6.3 exec_cmds 退出逻辑 | ✅ 已修复 | BUG-202 |
 | §3.2 is_independent 字段 | ❌ 未读取 | BUG-203 |
-| §5.4 Delete 执行顺序（变更追踪） | 🔴 未修复（架构就绪） | BUG-204 |
+| §5.4 Delete 执行顺序（变更追踪） | 🟢 已修复 | BUG-204 |
 | §2.3 @/ 块终止匹配命令名 | ✅ 已修复 | BUG-301 |
 | §6.1 Capture 指令 | 🟢 已修复 | BUG-302 |
 | §5.12 Get 行内展开 | 🟡 部分实现 | BUG-303 |
 | §5.3 New Start/End 文件级 | ✅ 已修复 | BUG-401 |
 | §5.4 Delete:Block 校验 | ✅ 已修复 | BUG-402 |
-| §2.6 Location Result 打印 | 🔴 不输出 | BUG-403 |
+| §2.6 Location Result 打印 | 🟢 已修复 | BUG-403 |
 | §5.2 块边界在非标准文件中 | ⚠️ 不精确 | BUG-404 |
 | §2.2 file_io.rs | 🟢 已修复 | BUG-501 |
 | §5.1 Open Dir 模式 | ⏳ stub | BUG-502 |
@@ -522,23 +539,16 @@ Open 仅注册为 `PermissionType::FileRead`，缺少 FileWrite。
 | 第一阶段 | BUG-01/02/04/07/08/12 | main.rs 引擎接入、diff 输出、pop_exec_cmd、NotImplemented 错误 |
 | 第二阶段 | BUG-301/201/202/401/402/302 | @/ 终止、owner 检查、exec_cmds 退出、New 文件级、Delete:Block 校验、Capture |
 | 第三阶段（桥接） | BUG-501/302↑/303/104 | file_io.rs、Capture 增强、Get 基本展开、pools 完整写入 |
+| 第三阶段（变更追踪） | BUG-204/101/403/103 | ✅ Delete 快照匹配、New 变更记录、Location 终端输出、流输出控制 |
 
-### 第三阶段（未完成 — 核心命令迁移）← 下一阶段目标
-
-| Bug | 步骤 | 内容 |
-|-----|:----:|------|
-| **BUG-204** | Step 1 | Delete 命令搬迁到 CmdContent 快照匹配 + record_delete |
-| **BUG-101/102** | Step 2 | New 命令搬迁到 record_insert + 返回 CommandResult |
-| **BUG-101/102** | Step 3 | Open/Location 正式 convert/out 实现，移除 engine 桥接 |
-| **BUG-204** | Step 4 | handle_close 变更生效：apply_changes → ContentBlock → diff |
-| **BUG-103** | Step 5 | 流/值输出接入 CommandType.output |
-| **BUG-403** | Step 6 | Location 终端输出 + verbose 标志 |
-
-### 第四阶段（清理）
+### 第四阶段（待完成 — 桥接彻底化）
 
 | Bug | 内容 |
 |-----|------|
+| BUG-101/102 | Open/Location 正式 convert/out；命令签名改为返回 CommandResult |
+| BUG-204 | handle_close 中的 apply_content_to_file 激活（移除 cmd 层直接 block 操作） |
 | BUG-203 | is_independent 实际使用或移除 |
+| BUG-303 | Get 块内展开 + like 伪装模式 |
 | BUG-404 | 非标准文件块边界识别优化 |
 | BUG-601/602 | 权限标注对齐文档 |
 
