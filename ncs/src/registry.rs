@@ -638,7 +638,11 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Get".to_string(),
                 exec_path: None,
-                cmd_type: CommandType::new(PermissionType::None, ExecutionType::ExpandOnly),
+                cmd_type: CommandType::with_output(
+                    PermissionType::None,
+                    ExecutionType::ExpandOnly,
+                    OutputType::StreamOutput,
+                ),
                 modes: get_modes,
                 subs: vec![],
                 owners: vec![],

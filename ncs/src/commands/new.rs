@@ -99,6 +99,19 @@ fn execute_normal(engine: &mut Engine, content: NewContent) -> Result<(), NcsErr
     let new_lines = executor::build_new_lines(&content);
     let new_line_count = new_lines.len();
 
+    // Phase 3: 在插入到 block 之前，记录变更到 CmdContent
+    if let Some(ref mut result) = engine.last_result {
+        let cmd_lines: Vec<crate::cmd_content::CmdLine> = new_lines
+            .iter()
+            .map(|l| crate::cmd_content::CmdLine {
+                line_num: l.line_num.to_usize(),
+                content: l.content.clone(),
+            })
+            .collect();
+        let after_line = insert_pos.saturating_sub(1);
+        result.content.record_insert(after_line, cmd_lines, "NEW");
+    }
+
     let (changed, context_above, context_below) = {
         let block = engine.block_stack.last_mut().ok_or(NcsError::Engine(
             crate::error::EngineError::MissingLocationForNew,

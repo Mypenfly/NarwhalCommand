@@ -58,7 +58,11 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         let title = err.title();
-        assert!(title.contains("无法打开文件"), "Expected CannotOpen, got: {}", title);
+        assert!(
+            title.contains("无法打开文件"),
+            "Expected CannotOpen, got: {}",
+            title
+        );
     }
 
     #[test]

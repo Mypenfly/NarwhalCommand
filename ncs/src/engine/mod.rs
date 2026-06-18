@@ -144,7 +144,7 @@ impl Engine {
                     }
 
                     // 4. 更新 last_result
-                    self.update_last_result(other)?;
+                    self.update_last_result(other, registry)?;
                 }
             }
         }
@@ -159,7 +159,9 @@ impl Engine {
                 crate::commands::open::execute(self, *mode, path, args)
             }
             Command::Location {
-                mode, content, args,
+                mode,
+                content,
+                args,
             } => crate::commands::location::execute(self, *mode, content.clone(), args),
             Command::New { mode, content } => {
                 crate::commands::new::execute(self, *mode, content.clone())
@@ -169,20 +171,23 @@ impl Engine {
             }
             Command::Raw { content } => crate::commands::raw::execute(self, content),
             Command::Capture { pool_name } => {
-                let content = self.last_result.take()
+                let content = self
+                    .last_result
+                    .take()
                     .map(|r| r.content)
                     .unwrap_or_default();
                 self.pools.insert(pool_name.clone(), content);
                 Ok(())
             }
-            Command::Get { pool_name, like: _like } => {
-                let content = self.pools.get(pool_name)
-                    .cloned()
-                    .ok_or_else(|| NcsError::Engine(
-                        crate::error::EngineError::NotImplemented {
-                            feature: format!("Get pool '{}' not found", pool_name),
-                        },
-                    ))?;
+            Command::Get {
+                pool_name,
+                like: _like,
+            } => {
+                let content = self.pools.get(pool_name).cloned().ok_or_else(|| {
+                    NcsError::Engine(crate::error::EngineError::NotImplemented {
+                        feature: format!("Get pool '{}' not found", pool_name),
+                    })
+                })?;
                 // 设置 last_result
                 let cmd_result = CommandResult {
                     content,
@@ -192,15 +197,40 @@ impl Engine {
                 Ok(())
             }
             Command::Close { .. } => Ok(()), // handled in execute loop
-            _ => Err(NcsError::Engine(crate::error::EngineError::NotImplemented {
-                feature: command.cmd_name(),
-            })),
+            _ => Err(NcsError::Engine(
+                crate::error::EngineError::NotImplemented {
+                    feature: command.cmd_name(),
+                },
+            )),
         }
     }
 
     /// 更新 last_result：从命令执行后的 engine 状态构建 CmdContent
-    fn update_last_result(&mut self, command: &Command) -> Result<(), NcsError> {
+    fn update_last_result(
+        &mut self,
+        command: &Command,
+        registry: &CommandRegistry,
+    ) -> Result<(), NcsError> {
         let cmd_name = command.cmd_name();
+
+        // 文件编辑命令始终为流输出（管道需要传递数据）
+        let is_file_editor = matches!(cmd_name.as_str(), "OPEN" | "LOCATION" | "NEW" | "DELETE");
+
+        // 其他命令查询注册表中的输出类型
+        let output_is_stream = if is_file_editor {
+            true
+        } else {
+            registry
+                .find_command(&cmd_name)
+                .and_then(|entry| entry.cmd_type.output.as_ref())
+                .is_some_and(|ot| matches!(ot, crate::registry::OutputType::StreamOutput))
+        };
+
+        // ValueOutput 命令不保留 last_result
+        if !output_is_stream {
+            self.last_result = None;
+            return Ok(());
+        }
 
         // 文件编辑命令：从 engine 状态构建 CmdContent
         let content = match cmd_name.as_str() {
@@ -214,8 +244,12 @@ impl Engine {
                             content: l.content.clone(),
                         })
                         .collect();
-                    let raw = cmd_lines.iter().map(|l| &l.content).cloned()
-                        .collect::<Vec<_>>().join("\n");
+                    let raw = cmd_lines
+                        .iter()
+                        .map(|l| &l.content)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let mut c = CmdContent::empty();
                     c.snapshot_lines = cmd_lines.clone();
                     c.snapshot_raw = raw.clone();
@@ -240,8 +274,12 @@ impl Engine {
                             content: l.content.clone(),
                         })
                         .collect();
-                    let raw = cmd_lines.iter().map(|l| &l.content).cloned()
-                        .collect::<Vec<_>>().join("\n");
+                    let raw = cmd_lines
+                        .iter()
+                        .map(|l| &l.content)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let mut c = CmdContent::empty();
                     c.snapshot_lines = cmd_lines.clone();
                     c.snapshot_raw = raw.clone();
@@ -254,54 +292,23 @@ impl Engine {
                     CmdContent::empty()
                 }
             }
-            "NEW" | "DELETE" => {
-                // New/Delete: 从前一个 last_result 继承 snapshot，追加变更
-                let mut c = self.last_result.take()
+            "NEW" => {
+                // New: 由 commands/new.rs 在 execute_normal 中
+                // 直接记录变更到 last_result.content（Phase 3 变更追踪），
+                // 此处仅传递已有内容。
+                self.last_result
+                    .take()
                     .map(|r| r.content)
-                    .unwrap_or_else(CmdContent::empty);
-                self.last_result = None;
-
-                if cmd_name == "NEW" {
-                    let new_content = match command {
-                        Command::New { content, .. } => Some(content),
-                        _ => None,
-                    };
-                    if let Some(content) = new_content {
-                        for line in &content.lines {
-                            c.record_insert(c.snapshot_lines.len(), vec![
-                                crate::cmd_content::CmdLine {
-                                    line_num: 1,
-                                    content: line.content.clone(),
-                                }
-                            ], "NEW");
-                        }
-                    }
-                }
-                if cmd_name == "DELETE" {
-                    let del_content = match command {
-                        Command::Delete { content, .. } => content.as_ref(),
-                        _ => None,
-                    };
-                    if let Some(del) = del_content {
-                        // Match on snapshot - collect indices first
-                        let mut matched_indices: Vec<usize> = Vec::new();
-                        for (i, snap_line) in c.snapshot_lines.iter().enumerate() {
-                            for del_line in &del.lines {
-                                let stripped_snap: String = snap_line.content.chars()
-                                    .filter(|ch| !ch.is_whitespace()).collect();
-                                let stripped_del: String = del_line.content.chars()
-                                    .filter(|ch| !ch.is_whitespace()).collect();
-                                if stripped_snap == stripped_del {
-                                    matched_indices.push(i);
-                                }
-                            }
-                        }
-                        for idx in matched_indices {
-                            c.record_delete(idx, idx, "DELETE");
-                        }
-                    }
-                }
-                c
+                    .unwrap_or_else(CmdContent::empty)
+            }
+            "DELETE" => {
+                // Delete: 由 commands/delete.rs 在 execute_normal 中
+                // 直接记录变更到 last_result.content（Phase 3 快照匹配），
+                // 此处仅传递已有内容。
+                self.last_result
+                    .take()
+                    .map(|r| r.content)
+                    .unwrap_or_else(CmdContent::empty)
             }
             _ => {
                 // 非文件编辑命令：last_result 不变
@@ -309,8 +316,10 @@ impl Engine {
             }
         };
 
-        let is_stream = matches!(cmd_name.as_str(), "OPEN" | "LOCATION" | "BASH");
-        self.last_result = Some(CommandResult { content, is_stream });
+        self.last_result = Some(CommandResult {
+            content,
+            is_stream: output_is_stream,
+        });
         Ok(())
     }
 
@@ -380,15 +389,21 @@ impl Engine {
             }
         }
 
-        // Phase 3: Location 关闭 — 先应用 CmdContent 变更到 ContentBlock
         let upper = name.to_uppercase();
         if upper == "LOCATION" || upper == "NEW" {
-            // Apply any pending changes from last_result before closing
-            if let Some(ref result) = self.last_result {
-                if !result.content.changes.is_empty() {
-                    self.apply_content_to_file(&result.content.clone())?;
-                }
-            }
+            // 桥接阶段：cmd 层已直接修改 block，此处跳过 apply。
+            // 完整迁移后（移除 cmd 层直接操作），此处取消注释；
+            // 调用 apply_content_to_file 将 CmdContent.changes 应用到 block。
+            // if let Some(ref result) = self.last_result {
+            //     if !result.content.changes.is_empty() {
+            //         self.apply_content_to_file(&result.content.clone())?;
+            //     }
+            // }
+        }
+
+        // Phase 3: Location 关闭时输出终端结果（--verbose）
+        if upper == "LOCATION" {
+            self.print_location_result()?;
         }
 
         match upper.as_str() {
@@ -413,10 +428,71 @@ impl Engine {
         Ok(())
     }
 
-    /// 将 CmdContent 中记录的变更写回文件/ContentBlock
-    fn apply_content_to_file(&mut self, _content: &CmdContent) -> Result<(), NcsError> {
-        // Phase 3: 变更延迟应用 — 将 ContentChange 转换为 ContentBlock 行操作
-        // 当前为 stub，完整实现待后续步骤
+    /// 将 CmdContent 中记录的变更写回当前 ContentBlock
+    ///
+    /// 读取 CmdContent.changes 列表，通过 apply_changes() 得到最终行列表，
+    /// 转换为 ContentBlock.lines 并 reindex。
+    #[allow(dead_code)] // 桥接阶段暂停调用，完整迁移后启用
+    fn apply_content_to_file(&mut self, content: &CmdContent) -> Result<(), NcsError> {
+        if content.changes.is_empty() {
+            return Ok(());
+        }
+
+        let mut temp = content.clone();
+        temp.apply_changes();
+
+        let block = self.block_stack.last_mut().ok_or(NcsError::Engine(
+            crate::error::EngineError::MissingLocationForNew,
+        ))?;
+
+        // 转换 CmdLine → Line
+        let new_lines: Vec<crate::model::Line> = temp
+            .lines
+            .iter()
+            .map(|cl| crate::model::Line {
+                line_num: crate::model::LineNumber::new(cl.line_num),
+                taps: 0,
+                diff_taps: 0,
+                content: cl.content.clone(),
+                stripped_content: crate::model::stripped_content(&cl.content),
+            })
+            .collect();
+
+        // 收集 diff（旧行删除 + 新行新增）
+        let old_content: Vec<String> = block.lines.iter().map(|l| l.content.clone()).collect();
+        let new_content: Vec<String> = new_lines.iter().map(|l| l.content.clone()).collect();
+
+        // 记录删除行
+        let deleted: Vec<crate::output::DiffLine> = block
+            .lines
+            .iter()
+            .filter(|l| !new_content.contains(&l.content))
+            .map(|l| crate::output::DiffLine {
+                kind: crate::output::DiffLineKind::Deleted,
+                line_number: Some(l.line_num),
+                content: l.content.clone(),
+            })
+            .collect();
+
+        // 记录新增行
+        let added: Vec<crate::output::DiffLine> = new_lines
+            .iter()
+            .filter(|l| !old_content.contains(&l.content))
+            .map(|l| crate::output::DiffLine {
+                kind: crate::output::DiffLineKind::Added,
+                line_number: Some(l.line_num),
+                content: l.content.clone(),
+            })
+            .collect();
+
+        block.lines = new_lines;
+        block.reindex();
+
+        // 合并 diff（删除行 + 新增行）
+        for line in deleted.into_iter().chain(added) {
+            self.diff_lines.push(line);
+        }
+
         Ok(())
     }
 
@@ -461,6 +537,29 @@ impl Engine {
     fn handle_implicit_close(&mut self) -> Result<(), NcsError> {
         if self.file.is_some() {
             self.write_back_to_file()?;
+        }
+        Ok(())
+    }
+
+    /// 在 --verbose 模式下输出 Location 匹配结果到终端
+    ///
+    /// 从 last_result.content.snapshot_lines 读取快照行，
+    /// 以灰色文本打印带行号的行列表。
+    fn print_location_result(&self) -> Result<(), NcsError> {
+        if !self.verbose {
+            return Ok(());
+        }
+        if let Some(ref result) = self.last_result {
+            let path = self.file_path.as_deref().unwrap_or("");
+            eprintln!("[Location] {}", path);
+            for line in &result.content.result {
+                eprintln!("    {}| {}", line.line_num, line.content);
+            }
+            if result.content.result.is_empty() {
+                for line in &result.content.snapshot_lines {
+                    eprintln!("    {}| {}", line.line_num, line.content);
+                }
+            }
         }
         Ok(())
     }
@@ -850,9 +949,15 @@ mod tests {
         let result = engine.execute(commands, &registry);
         assert!(result.is_ok(), "Open should succeed");
 
-        let last = engine.last_result.as_ref().expect("last_result should be set after Open");
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should be set after Open");
         assert!(last.is_stream, "Open should be stream output");
-        assert!(!last.content.snapshot_lines.is_empty(), "Open should populate snapshot_lines");
+        assert!(
+            !last.content.snapshot_lines.is_empty(),
+            "Open should populate snapshot_lines"
+        );
         assert!(!last.content.lines.is_empty(), "Open should populate lines");
     }
 
@@ -885,12 +990,23 @@ mod tests {
         let result = engine.execute(commands, &registry);
         assert!(result.is_ok(), "Open+Location should succeed");
 
-        let last = engine.last_result.as_ref().expect("last_result should be set");
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should be set");
         // Location 产生快照
-        assert!(!last.content.snapshot_lines.is_empty(),
-            "Location should set snapshot_lines, got {} lines", last.content.snapshot_lines.len());
-        assert!(matches!(&last.content.source_info, Some(crate::cmd_content::ContentSource::Block { .. })),
-            "Location should set source_info to Block");
+        assert!(
+            !last.content.snapshot_lines.is_empty(),
+            "Location should set snapshot_lines, got {} lines",
+            last.content.snapshot_lines.len()
+        );
+        assert!(
+            matches!(
+                &last.content.source_info,
+                Some(crate::cmd_content::ContentSource::Block { .. })
+            ),
+            "Location should set source_info to Block"
+        );
     }
 
     #[test]
@@ -932,10 +1048,18 @@ mod tests {
         let result = engine.execute(commands, &registry);
         assert!(result.is_ok(), "Expected success, got {:?}", result.err());
 
-        let last = engine.last_result.as_ref().expect("last_result should be set");
-        assert!(!last.content.changes.is_empty(), "New should record a change");
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should be set");
+        assert!(
+            !last.content.changes.is_empty(),
+            "New should record a change"
+        );
         match &last.content.changes[0] {
-            crate::cmd_content::ContentChange::Insert { lines, source_cmd, .. } => {
+            crate::cmd_content::ContentChange::Insert {
+                lines, source_cmd, ..
+            } => {
                 assert!(!lines.is_empty());
                 assert_eq!(source_cmd, "NEW");
             }
@@ -945,7 +1069,8 @@ mod tests {
 
     #[test]
     fn test_delete_command_matches_on_snapshot_and_records_delete_change() {
-        let (_dir, path) = make_temp_file("fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n");
+        let (_dir, path) =
+            make_temp_file("fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n");
         let mut engine = Engine::new();
         let registry = crate::registry::CommandRegistry::init();
 
@@ -970,12 +1095,10 @@ mod tests {
             Command::Delete {
                 mode: crate::parser::DeleteMode::Normal,
                 content: Some(crate::model::DeleteContent {
-                    lines: vec![
-                        crate::model::DeleteLine {
-                            content: "    let old = 1;".to_string(),
-                            is_raw: false,
-                        },
-                    ],
+                    lines: vec![crate::model::DeleteLine {
+                        content: "    let old = 1;".to_string(),
+                        is_raw: false,
+                    }],
                 }),
             },
         ];
@@ -983,10 +1106,20 @@ mod tests {
         let result = engine.execute(commands, &registry);
         assert!(result.is_ok(), "Expected success, got {:?}", result.err());
 
-        let last = engine.last_result.as_ref().expect("last_result should be set");
-        assert!(!last.content.changes.is_empty(), "Delete should record a change");
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should be set");
+        assert!(
+            !last.content.changes.is_empty(),
+            "Delete should record a change"
+        );
         match &last.content.changes[0] {
-            crate::cmd_content::ContentChange::Delete { start_line, end_line, source_cmd } => {
+            crate::cmd_content::ContentChange::Delete {
+                start_line,
+                end_line,
+                source_cmd,
+            } => {
                 assert_eq!(*start_line, 1, "Delete should start at line 1");
                 assert_eq!(*end_line, 1);
                 assert_eq!(source_cmd, "DELETE");
@@ -1001,9 +1134,8 @@ mod tests {
         // 不应受 New 插入影响。当前桥接实现仍使用旧版 commands/delete.rs
         // 的直接 ContentBlock 操作路径，因此此测试预期失败。
         // TODO: Phase 3 完成后，将此测试改为严格断言（应成功）
-        let (_dir, path) = make_temp_file(
-            "fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n",
-        );
+        let (_dir, path) =
+            make_temp_file("fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n");
         let mut engine = Engine::new();
         let registry = crate::registry::CommandRegistry::init();
 
@@ -1050,7 +1182,10 @@ mod tests {
         // 当前旧版 Delete 路径仍存在 BUG-204，但 last_result 中的 changes 已正确记录
         if result.is_err() {
             // expected: BUG-204 not yet fixed in old code path
-            eprintln!("BUG-204 still present in legacy command path (expected): {:?}", result.err());
+            eprintln!(
+                "BUG-204 still present in legacy command path (expected): {:?}",
+                result.err()
+            );
         }
     }
 
@@ -1122,9 +1257,15 @@ mod tests {
 
         let result = engine.execute(commands, &registry);
         assert!(result.is_ok());
-        assert!(engine.pools.contains_key("my_capture"), "Capture should store in pools");
+        assert!(
+            engine.pools.contains_key("my_capture"),
+            "Capture should store in pools"
+        );
         let stored = engine.pools.get("my_capture").unwrap();
-        assert!(!stored.snapshot_lines.is_empty(), "Captured content should have snapshot");
+        assert!(
+            !stored.snapshot_lines.is_empty(),
+            "Captured content should have snapshot"
+        );
     }
 
     #[test]
@@ -1146,7 +1287,10 @@ mod tests {
         let result = engine.execute(commands, &registry);
         assert!(result.is_ok(), "Get should succeed, got {:?}", result.err());
 
-        let last = engine.last_result.as_ref().expect("last_result should be set");
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should be set");
         assert_eq!(last.content.raw_content, "hello\nworld");
     }
 

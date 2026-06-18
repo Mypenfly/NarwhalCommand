@@ -86,7 +86,7 @@ fn execute_block(engine: &mut Engine) -> Result<(), NcsError> {
     Ok(())
 }
 
-/// 在 ContentBlock 中逐行匹配并删除
+/// 在 CmdContent 快照或 ContentBlock 中逐行匹配并删除
 fn execute_normal(engine: &mut Engine, content: Option<DeleteContent>) -> Result<(), NcsError> {
     let del_content = content.ok_or(NcsError::Engine(
         crate::error::EngineError::MissingLocationForNew,
@@ -96,24 +96,97 @@ fn execute_normal(engine: &mut Engine, content: Option<DeleteContent>) -> Result
         crate::error::EngineError::MissingLocationForNew,
     ))?;
 
-    let (start_idx, end_idx) = match executor::find_delete_match(block, &del_content) {
-        Some(range) => range,
-        None => return Err(executor::delete_not_found_error(&del_content, block)),
+    // 优先从 last_result.snapshot_lines 匹配（Phase 3 快照路径），
+    // 若不可用则回退到 block-based 匹配。
+    let use_snapshot = engine
+        .last_result
+        .as_ref()
+        .is_some_and(|r| !r.content.snapshot_lines.is_empty());
+
+    let (snapshot_start_idx, snapshot_end_idx) = if use_snapshot {
+        let snapshot = &engine.last_result.as_ref().unwrap().content.snapshot_lines;
+        let (s, e) = executor::find_delete_match_in_snapshot(snapshot, &del_content)
+            .ok_or_else(|| executor::delete_not_found_in_snapshot_error(&del_content, snapshot))?;
+
+        let matched_line_count = match &block.match_info {
+            MatchInfo::Location { matched_line_count } => *matched_line_count,
+            _ => 0,
+        };
+        executor::check_delete_adjacency_in_snapshot(snapshot, matched_line_count, s)?;
+        (s, e)
+    } else {
+        let (s, e) = executor::find_delete_match(block, &del_content)
+            .ok_or_else(|| executor::delete_not_found_error(&del_content, block))?;
+        executor::check_delete_adjacency(block, s)?;
+        (s, e)
     };
 
-    // 检查邻接关系
-    executor::check_delete_adjacency(block, start_idx)?;
+    // 将快照索引映射到 block.lines 中的实际位置。
+    // 若快照与 block 内容一致（无先前修改），直接使用快照索引。
+    // 否则通过去空白内容逐行搜索对应位置。
+    let (block_start_idx, block_end_idx) = if use_snapshot {
+        let snapshot = &engine.last_result.as_ref().unwrap().content.snapshot_lines;
+        let synced = snapshot.len() == block.lines.len()
+            && snapshot
+                .iter()
+                .zip(block.lines.iter())
+                .all(|(s, b)| s.content == b.content);
+
+        if synced {
+            (snapshot_start_idx, snapshot_end_idx)
+        } else {
+            // 快照与 block 不同步（之前有 New 修改了 block），查找对应位置
+            let start =
+                executor::map_snapshot_index_to_block_index(block, snapshot, snapshot_start_idx);
+            let end =
+                executor::map_snapshot_index_to_block_index(block, snapshot, snapshot_end_idx);
+
+            match (start, end) {
+                (Some(bs), Some(be)) if be >= bs => (bs, be),
+                (Some(bs), None) => {
+                    // 仅找到起点，假设终点紧邻起点
+                    (bs, bs + (snapshot_end_idx - snapshot_start_idx))
+                }
+                _ => (snapshot_start_idx, snapshot_end_idx),
+            }
+        }
+    } else {
+        (snapshot_start_idx, snapshot_end_idx)
+    };
+
+    let block_start_idx = block_start_idx.min(block.lines.len().saturating_sub(1));
+    let block_end_idx = block_end_idx.min(block.lines.len().saturating_sub(1));
+
+    if block_end_idx < block_start_idx {
+        return Err(NcsError::Match(
+            crate::error::MatchError::DeleteMatchFailed {
+                delete_content: del_content
+                    .lines
+                    .first()
+                    .map(|l| l.content.clone())
+                    .unwrap_or_default(),
+                block_snippet: String::from("mapping failed: block_end < block_start"),
+            },
+        ));
+    }
 
     // 在删除之前收集上下文和删除行数据
     let (changed, context_above, context_below) =
-        executor::collect_deleted_diff_data(block, start_idx, end_idx);
+        executor::collect_deleted_diff_data(block, block_start_idx, block_end_idx);
 
     // 执行删除
-    block.lines.drain(start_idx..=end_idx);
+    block.lines.drain(block_start_idx..=block_end_idx);
     block.match_info = MatchInfo::DeleteAt {
-        position: start_idx,
+        position: block_start_idx,
     };
     block.reindex();
+
+    // Phase 3: 记录变更到 CmdContent（供后续 apply_changes 使用）
+    if let Some(ref mut result) = engine.last_result {
+        result
+            .content
+            .record_delete(snapshot_start_idx, snapshot_end_idx, "DELETE");
+    }
 
     engine.record_diff_with_context(changed, context_above, context_below);
     Ok(())
@@ -124,7 +197,7 @@ mod tests {
     use super::*;
     use crate::engine::Engine;
     use crate::model::{DeleteContent, DeleteLine};
-    use crate::parser::{DeleteMode, LocationMode, OpenMode};
+    use crate::parser::{Command, DeleteMode, LocationMode, OpenMode};
     use std::collections::HashMap;
 
     /// 创建带临时文件的引擎（已执行 Open + Location）
@@ -274,6 +347,183 @@ mod tests {
 
         let result = execute(&mut engine, DeleteMode::Block, None);
         assert!(result.is_ok());
+    }
+
+    // ============================================================
+    // BUG-204: Delete 在 snapshot 上匹配（New 在前不污染匹配）
+    // ============================================================
+
+    #[test]
+    fn test_delete_matches_on_snapshot_not_affected_by_prior_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        std::fs::write(
+            &file_path,
+            "fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n",
+        )
+        .unwrap();
+
+        let mut engine = Engine::new();
+        let registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![
+            Command::Open {
+                mode: crate::parser::OpenMode::Normal,
+                path: file_path.to_str().unwrap().to_string(),
+                args: HashMap::new(),
+            },
+            Command::Location {
+                mode: crate::parser::LocationMode::Normal,
+                content: Some(crate::model::LocationContent {
+                    lines: vec![crate::model::LocationLine {
+                        index: 0,
+                        diff_taps: Some(0),
+                        content: "fn main() {".to_string(),
+                        line_num: None,
+                    }],
+                }),
+                args: HashMap::new(),
+            },
+            Command::New {
+                mode: crate::parser::NewMode::Normal,
+                content: crate::model::NewContent {
+                    lines: vec![crate::model::NewLine {
+                        diff_taps: 4,
+                        content: "let inserted = 42;".to_string(),
+                        is_raw: false,
+                    }],
+                },
+            },
+            Command::Delete {
+                mode: crate::parser::DeleteMode::Normal,
+                content: Some(make_delete_content(&["    let old = 1;"])),
+            },
+        ];
+
+        let result = engine.execute(commands, &registry);
+        assert!(
+            result.is_ok(),
+            "Delete should succeed when matching on snapshot, got: {:?}",
+            result.err()
+        );
+
+        // 验证快照匹配工作：last_result 应有 Delete 变更记录
+        let last = engine.last_result.as_ref().unwrap();
+        assert!(
+            !last.content.changes.is_empty(),
+            "Should have recorded Delete change"
+        );
+    }
+
+    #[test]
+    fn test_delete_matches_on_snapshot_with_multiple_new_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        std::fs::write(
+            &file_path,
+            "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n",
+        )
+        .unwrap();
+
+        let mut engine = Engine::new();
+        let registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![
+            Command::Open {
+                mode: crate::parser::OpenMode::Normal,
+                path: file_path.to_str().unwrap().to_string(),
+                args: HashMap::new(),
+            },
+            Command::Location {
+                mode: crate::parser::LocationMode::Normal,
+                content: Some(crate::model::LocationContent {
+                    lines: vec![
+                        crate::model::LocationLine {
+                            index: 0,
+                            diff_taps: Some(0),
+                            content: "fn main() {".to_string(),
+                            line_num: None,
+                        },
+                        crate::model::LocationLine {
+                            index: 1,
+                            diff_taps: Some(4),
+                            content: "    let a = 1;".to_string(),
+                            line_num: None,
+                        },
+                    ],
+                }),
+                args: HashMap::new(),
+            },
+            Command::New {
+                mode: crate::parser::NewMode::Normal,
+                content: crate::model::NewContent {
+                    lines: vec![crate::model::NewLine {
+                        diff_taps: 4,
+                        content: "let x = 0;".to_string(),
+                        is_raw: false,
+                    }],
+                },
+            },
+            Command::New {
+                mode: crate::parser::NewMode::Normal,
+                content: crate::model::NewContent {
+                    lines: vec![crate::model::NewLine {
+                        diff_taps: 4,
+                        content: "let y = 0;".to_string(),
+                        is_raw: false,
+                    }],
+                },
+            },
+            Command::Delete {
+                mode: crate::parser::DeleteMode::Normal,
+                content: Some(make_delete_content(&["    let b = 2;"])),
+            },
+        ];
+
+        let result = engine.execute(commands, &registry);
+        assert!(
+            result.is_ok(),
+            "Delete should still find 'let b = 2' in snapshot, got: {:?}",
+            result.err()
+        );
+
+        // block_stack 已被隐式关闭清空，检查 file 中的最终内容
+        let file = engine.file.as_ref().unwrap();
+        // 原 5 行, Delete 删 1, New 加 2 = 6 行
+        assert_eq!(file.lines.len(), 6);
+        // 验证 let b 已被删除
+        let contents: Vec<&str> = file
+            .lines
+            .iter()
+            .map(|l| l.stripped_content.as_str())
+            .collect();
+        assert!(!contents.contains(&"letb=2;"), "let b should be deleted");
+    }
+
+    #[test]
+    fn test_delete_with_empty_location_and_new_replacement() {
+        // 模拟 boundary 1: 空 Location + Delete + New（替换场景）
+        let file_content = "// header\n#[test]\nfn test_config_default() {\n    let config = AppConfig::default();\n    assert_eq!(config.name, \"myapp\");\n}\n// footer\n";
+        let (_dir, mut engine) = engine_with_location(file_content, &[]);
+
+        // 删除 test_config_default 函数
+        let del = make_delete_content(&[
+            "#[test]",
+            "fn test_config_default() {",
+            "let config = AppConfig::default();",
+            "assert_eq!(config.name, \"myapp\");",
+            "}",
+        ]);
+        let result = execute(&mut engine, DeleteMode::Normal, Some(del));
+        assert!(
+            result.is_ok(),
+            "Delete with empty Location should work, got: {:?}",
+            result.err()
+        );
+
+        let block = engine.block_stack.last().unwrap();
+        // 原 7 行, 删 5 行, 剩 2 行
+        assert_eq!(block.lines.len(), 2);
     }
 
     /// 辅助

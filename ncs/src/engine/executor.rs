@@ -18,6 +18,7 @@
 //!
 //! 从 n_edit/src/engine.rs 拆分出来的纯函数。
 
+use crate::cmd_content::CmdLine;
 use crate::error::NcsError;
 use crate::model::{
     self, ContentBlock, DeleteContent, DeleteLine, FileContent, Line, LineNumber, MatchInfo,
@@ -156,6 +157,140 @@ pub fn delete_not_found_error(del_content: &DeleteContent, block: &ContentBlock)
         delete_content: first_del_line.to_string(),
         block_snippet,
     })
+}
+
+/// 构建 Delete 未找到匹配时的错误信息（基于 CmdLine 快照）
+pub fn delete_not_found_in_snapshot_error(
+    del_content: &DeleteContent,
+    snapshot: &[CmdLine],
+) -> NcsError {
+    let first_del_line = del_content
+        .lines
+        .first()
+        .map(|l| l.content.as_str())
+        .unwrap_or("");
+    let block_snippet = snapshot
+        .iter()
+        .take(BLOCK_SNIPPET_MAX_LINES)
+        .map(|l| l.content.as_str())
+        .collect::<Vec<&str>>()
+        .join("\n");
+    NcsError::Match(crate::error::MatchError::DeleteMatchFailed {
+        delete_content: first_del_line.to_string(),
+        block_snippet,
+    })
+}
+
+// ============================================================
+// Delete 匹配辅助函数（CmdLine 快照版本）
+// ============================================================
+// 以下函数与上面的 ContentBlock 版本对偶，但操作 CmdLine 快照。
+// 用于 Phase 3 变更追踪模型：Delete 匹配在 snapshot_lines 上进行。
+
+/// 在 CmdLine 快照中查找 DeleteContent 的连续匹配区间
+///
+/// 返回 (start_index, end_index) 在 snapshot 中的索引。
+/// 要求匹配行连续，不可跳行。
+pub fn find_delete_match_in_snapshot(
+    snapshot: &[CmdLine],
+    del_content: &DeleteContent,
+) -> Option<(usize, usize)> {
+    let del_lines = &del_content.lines;
+    if del_lines.is_empty() || snapshot.is_empty() {
+        return None;
+    }
+
+    let first_del_stripped = model::stripped_content(&del_lines[0].content);
+
+    for start_idx in 0..snapshot.len() {
+        if snapshot[start_idx].stripped_content() != first_del_stripped {
+            continue;
+        }
+        if start_idx + del_lines.len() > snapshot.len() {
+            continue;
+        }
+        if cmd_lines_continuously_match(snapshot, del_lines, start_idx) {
+            return Some((start_idx, start_idx + del_lines.len() - 1));
+        }
+    }
+    None
+}
+
+/// 检查从 start_idx 开始，CmdLine 快照的行是否与 delete_content 所有行连续匹配
+pub fn cmd_lines_continuously_match(
+    snapshot: &[CmdLine],
+    del_lines: &[DeleteLine],
+    start_idx: usize,
+) -> bool {
+    for (offset, del_line) in del_lines.iter().enumerate() {
+        let snap_line = &snapshot[start_idx + offset];
+        let snap_stripped = snap_line.stripped_content();
+        let del_stripped = model::stripped_content(&del_line.content);
+        let snap_is_empty = snap_line.content.trim().is_empty();
+        let del_is_empty = del_line.content.trim().is_empty();
+
+        if snap_is_empty && del_is_empty {
+            continue;
+        }
+        if snap_is_empty || del_is_empty {
+            return false;
+        }
+        if snap_stripped != del_stripped {
+            return false;
+        }
+    }
+    true
+}
+
+/// 检查 Delete 在快照中的匹配位置是否与 Location 匹配的最后一行紧邻
+///
+/// matched_line_count 是 Location 在快照中匹配的行数。
+pub fn check_delete_adjacency_in_snapshot(
+    snapshot: &[CmdLine],
+    matched_line_count: usize,
+    start_idx: usize,
+) -> Result<(), NcsError> {
+    if matched_line_count == 0 {
+        return Ok(());
+    }
+    let location_last_idx = matched_line_count.saturating_sub(1);
+    if start_idx <= location_last_idx {
+        return Ok(());
+    }
+    let gap_non_empty: Vec<_> = snapshot[location_last_idx + 1..start_idx]
+        .iter()
+        .filter(|l| !l.content.trim().is_empty())
+        .collect();
+    if !gap_non_empty.is_empty() {
+        let loc_last = &snapshot[location_last_idx].content;
+        let del_first = &snapshot[start_idx].content;
+        return Err(NcsError::Match(
+            crate::error::MatchError::DeleteNotAdjacent {
+                location_last_line: loc_last.clone(),
+                delete_first_line: del_first.clone(),
+                gap_lines: gap_non_empty.len(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// 将 CmdLine 快照中的匹配索引映射到 ContentBlock 的 lines 中对应位置
+///
+/// 通过去空白内容匹配找到 block.lines 中的对应索引。
+pub fn map_snapshot_index_to_block_index(
+    block: &ContentBlock,
+    snapshot: &[CmdLine],
+    snapshot_index: usize,
+) -> Option<usize> {
+    if snapshot_index >= snapshot.len() {
+        return None;
+    }
+    let target_stripped = snapshot[snapshot_index].stripped_content();
+    block
+        .lines
+        .iter()
+        .position(|l| l.stripped_content() == target_stripped)
 }
 
 // ============================================================
@@ -665,5 +800,128 @@ mod tests {
     fn test_get_block_key() {
         let block = make_block(&["a", "b"], 10);
         assert_eq!(get_block_key(&block), (10, 11));
+    }
+
+    // ============================================================
+    // Phase 3: 快照匹配函数测试 (CmdLine)
+    // ============================================================
+
+    fn make_snapshot(lines: &[&str]) -> Vec<CmdLine> {
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, s)| CmdLine {
+                line_num: i + 1,
+                content: s.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_find_delete_match_in_snapshot_single_line() {
+        let snapshot = make_snapshot(&["aaa", "bbb", "ccc"]);
+        let del = DeleteContent {
+            lines: vec![DeleteLine {
+                content: "bbb".to_string(),
+                is_raw: false,
+            }],
+        };
+        let result = find_delete_match_in_snapshot(&snapshot, &del);
+        assert_eq!(result, Some((1, 1)));
+    }
+
+    #[test]
+    fn test_find_delete_match_in_snapshot_multi_line() {
+        let snapshot = make_snapshot(&["aaa", "   bbb", "   ccc", "ddd"]);
+        let del = DeleteContent {
+            lines: vec![
+                DeleteLine {
+                    content: "   bbb".to_string(),
+                    is_raw: false,
+                },
+                DeleteLine {
+                    content: "   ccc".to_string(),
+                    is_raw: false,
+                },
+            ],
+        };
+        let result = find_delete_match_in_snapshot(&snapshot, &del);
+        assert_eq!(result, Some((1, 2)));
+    }
+
+    #[test]
+    fn test_find_delete_match_in_snapshot_not_found() {
+        let snapshot = make_snapshot(&["aaa", "bbb"]);
+        let del = DeleteContent {
+            lines: vec![DeleteLine {
+                content: "zzz".to_string(),
+                is_raw: false,
+            }],
+        };
+        let result = find_delete_match_in_snapshot(&snapshot, &del);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_delete_match_in_snapshot_empty_del() {
+        let snapshot = make_snapshot(&["aaa"]);
+        let del = DeleteContent { lines: vec![] };
+        assert_eq!(find_delete_match_in_snapshot(&snapshot, &del), None);
+    }
+
+    #[test]
+    fn test_check_delete_adjacency_in_snapshot_ok() {
+        let snapshot = make_snapshot(&["fn foo() {", "    bar();", "    baz();", "}"]);
+        // matched_line_count = 2, Delete starts at 2 (baz) → adjacent to location last (1)
+        assert!(check_delete_adjacency_in_snapshot(&snapshot, 2, 2).is_ok());
+    }
+
+    #[test]
+    fn test_check_delete_adjacency_in_snapshot_only_empty_gap() {
+        let snapshot = make_snapshot(&["fn foo() {", "", "", "    baz();", "}"]);
+        // matched_line_count = 1, Delete at 3, gap has only empty lines → adjacent
+        assert!(check_delete_adjacency_in_snapshot(&snapshot, 1, 3).is_ok());
+    }
+
+    #[test]
+    fn test_check_delete_adjacency_in_snapshot_non_empty_gap() {
+        let snapshot = make_snapshot(&[
+            "fn foo() {",
+            "    bar();",
+            "    extra();",
+            "    baz();",
+            "}",
+        ]);
+        // matched_line_count = 1, Delete at 3 (baz), gap has "extra()" → error
+        let result = check_delete_adjacency_in_snapshot(&snapshot, 1, 3);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_map_snapshot_index_to_block_index() {
+        let block = make_block(&["aaa", "   bbb", "   ccc"], 1);
+        let snapshot = make_snapshot(&["aaa", "   bbb", "   ccc"]);
+        assert_eq!(
+            map_snapshot_index_to_block_index(&block, &snapshot, 0),
+            Some(0)
+        );
+        assert_eq!(
+            map_snapshot_index_to_block_index(&block, &snapshot, 1),
+            Some(1)
+        );
+        assert_eq!(
+            map_snapshot_index_to_block_index(&block, &snapshot, 2),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_map_snapshot_index_to_block_index_not_found() {
+        let block = make_block(&["aaa", "bbb"], 1);
+        let snapshot = make_snapshot(&["zzz"]);
+        assert_eq!(
+            map_snapshot_index_to_block_index(&block, &snapshot, 0),
+            None
+        );
     }
 }

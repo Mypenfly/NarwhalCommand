@@ -59,6 +59,16 @@ pub struct CmdLine {
     pub content: String,
 }
 
+impl CmdLine {
+    /// 返回去除所有空白字符后的内容，用于模糊匹配
+    pub fn stripped_content(&self) -> String {
+        self.content
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect()
+    }
+}
+
 /// 内容变更记录 — 命令对 CmdContent 的修改追踪
 #[derive(Debug, Clone)]
 pub enum ContentChange {
