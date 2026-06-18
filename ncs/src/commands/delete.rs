@@ -37,7 +37,23 @@ pub fn execute(
 }
 
 /// 删除整个 ContentBlock
+///
+/// 要求前一个 Location 也使用 Block 模式。
 fn execute_block(engine: &mut Engine) -> Result<(), NcsError> {
+    // 检查前一个 Location 是否为 Block 模式
+    let location_is_block = engine
+        .exec_cmds
+        .iter()
+        .rev()
+        .find(|ec| ec.cmd_name == "LOCATION")
+        .is_some_and(|ec| ec.mode_name == "Block");
+
+    if !location_is_block {
+        return Err(NcsError::Engine(
+            crate::error::EngineError::BlockRequiredForDelete,
+        ));
+    }
+
     let block = engine.block_stack.last_mut().ok_or(NcsError::Engine(
         crate::error::EngineError::MissingLocationForNew,
     ))?;
@@ -172,6 +188,12 @@ mod tests {
     fn test_delete_block_clears_block() {
         let (_dir, mut engine) =
             engine_with_location("fn foo() {\n    bar();\n    baz();\n}\n", &["fn foo() {"]);
+        // Delete:Block 要求 Location 也是 Block 模式
+        engine.exec_cmds.push(crate::engine::ExecutedCommand {
+            cmd_name: "LOCATION".to_string(),
+            mode_name: "Block".to_string(),
+            is_independent: false,
+        });
 
         let result = execute(&mut engine, DeleteMode::Block, None);
         assert!(result.is_ok());
@@ -204,10 +226,54 @@ mod tests {
     fn test_delete_normal_not_found_errors() {
         let (_dir, mut engine) =
             engine_with_location("fn foo() {\n    bar();\n}\n", &["fn foo() {"]);
+        // 先设置 exec_cmds 以便 Delete:Block 检查通过
+        engine.exec_cmds.push(crate::engine::ExecutedCommand {
+            cmd_name: "LOCATION".to_string(),
+            mode_name: "Normal".to_string(),
+            is_independent: false,
+        });
 
         let del = make_delete_content(&["nonexistent();"]);
         let result = execute(&mut engine, DeleteMode::Normal, Some(del));
         assert!(result.is_err());
+    }
+
+    // ============================================================
+    // BUG-402: Delete:Block 校验 Location:Block
+    // ============================================================
+
+    #[test]
+    fn test_delete_block_with_location_normal_errors() {
+        let (_dir, mut engine) =
+            engine_with_location("fn foo() {\n    bar();\n    baz();\n}\n", &["fn foo() {"]);
+        // Location 是 Normal 模式
+        engine.exec_cmds.push(crate::engine::ExecutedCommand {
+            cmd_name: "LOCATION".to_string(),
+            mode_name: "Normal".to_string(),
+            is_independent: false,
+        });
+
+        let result = execute(&mut engine, DeleteMode::Block, None);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NcsError::Engine(crate::error::EngineError::BlockRequiredForDelete) => {}
+            other => panic!("Expected BlockRequiredForDelete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_delete_block_with_location_block_succeeds() {
+        let (_dir, mut engine) =
+            engine_with_location("fn foo() {\n    bar();\n    baz();\n}\n", &["fn foo() {"]);
+        // Location 是 Block 模式
+        engine.exec_cmds.push(crate::engine::ExecutedCommand {
+            cmd_name: "LOCATION".to_string(),
+            mode_name: "Block".to_string(),
+            is_independent: false,
+        });
+
+        let result = execute(&mut engine, DeleteMode::Block, None);
+        assert!(result.is_ok());
     }
 
     /// 辅助

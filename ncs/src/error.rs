@@ -459,6 +459,11 @@ pub enum EngineError {
         /// 失败原因
         reason: String,
     },
+    /// 功能尚未实现
+    NotImplemented {
+        /// 功能描述
+        feature: String,
+    },
 }
 
 impl EngineError {
@@ -472,12 +477,21 @@ impl EngineError {
             }
             EngineError::BlockStackEmpty => "Block 栈为空，无法执行关闭操作".to_string(),
             EngineError::ImplicitOffFailed { .. } => "隐式关闭执行失败".to_string(),
+            EngineError::NotImplemented { feature } => {
+                format!("{} 功能尚未实现", feature)
+            }
         }
     }
 
     pub fn detail(&self) -> String {
         match self {
             EngineError::ImplicitOffFailed { reason } => reason.clone(),
+            EngineError::NotImplemented { feature } => {
+                format!(
+                    "{} 模式/命令在当前版本中不可用，将在后续阶段实现。",
+                    feature
+                )
+            }
             _ => String::new(),
         }
     }
@@ -498,6 +512,9 @@ impl EngineError {
             }
             EngineError::ImplicitOffFailed { .. } => {
                 vec!["检查文件是否在脚本执行过程中被修改或删除"]
+            }
+            EngineError::NotImplemented { .. } => {
+                vec!["请关注后续版本更新"]
             }
         }
     }

@@ -17,6 +17,8 @@ pub struct AppConfig {
     /// Number of worker threads for the async runtime
     pub worker_threads: usize,
     /// Minimum password length for user accounts
+/// Log level filter (trace, debug, info, warn, error)
+pub log_level: String,
     pub min_password_length: u32,
     /// Number of bcrypt salt rounds
     pub password_salt_rounds: u32,

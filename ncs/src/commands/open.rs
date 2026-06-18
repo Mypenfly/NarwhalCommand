@@ -80,10 +80,11 @@ fn execute_dir(
     _path: &str,
     _args: &std::collections::HashMap<String, String>,
 ) -> Result<(), NcsError> {
-    // Phase 2.3: 待实现 Dir 模式
-    Err(NcsError::File(crate::error::FileError::NotFound {
-        path: _path.to_string(),
-    }))
+    Err(NcsError::Engine(
+        crate::error::EngineError::NotImplemented {
+            feature: "Open Dir 模式".to_string(),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -201,5 +202,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(engine.file.as_ref().unwrap().lines.len(), 2);
+    }
+
+    #[test]
+    fn test_open_dir_returns_not_implemented() {
+        let mut engine = Engine::new();
+        let result = execute(&mut engine, OpenMode::Dir, "./some_dir", &HashMap::new());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NcsError::Engine(crate::error::EngineError::NotImplemented { .. }) => {}
+            other => panic!("Expected NotImplemented error, got {:?}", other),
+        }
     }
 }

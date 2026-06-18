@@ -33,58 +33,52 @@ pub fn execute(engine: &mut Engine, mode: NewMode, content: NewContent) -> Resul
 }
 
 /// 在文件/Block 开头插入新内容
+///
+/// New(Start) 始终在文件级别操作，不考虑 block_stack。
 fn execute_start(engine: &mut Engine, content: NewContent) -> Result<(), NcsError> {
     let new_lines = executor::build_new_lines(&content);
     let new_line_count = new_lines.len();
 
-    if let Some(block) = engine.block_stack.last_mut() {
-        let insert_pos = 0;
-        let tail = std::mem::take(&mut block.lines);
-        let mut combined = new_lines;
-        combined.extend(tail);
-        block.lines = combined;
-        block.reindex();
+    let file = engine
+        .file
+        .as_mut()
+        .ok_or(NcsError::File(crate::error::FileError::NotFound {
+            path: "(no file opened)".to_string(),
+        }))?;
 
-        let (changed, context_above, context_below) =
-            executor::collect_added_diff_data(block, insert_pos, new_line_count);
-        engine.record_diff_with_context(changed, context_above, context_below);
-    } else if let Some(ref mut file) = engine.file {
-        let insert_pos = 0;
-        let tail = std::mem::take(&mut file.lines);
-        let mut combined = new_lines;
-        combined.extend(tail);
-        file.lines = combined;
-        executor::reindex_file(file);
+    let insert_pos = 0;
+    let tail = std::mem::take(&mut file.lines);
+    let mut combined = new_lines;
+    combined.extend(tail);
+    file.lines = combined;
+    executor::reindex_file(file);
 
-        let added_entries = executor::collect_new_file_line_info(file, insert_pos, new_line_count);
-        engine.record_added_lines(added_entries);
-    }
+    let added_entries = executor::collect_new_file_line_info(file, insert_pos, new_line_count);
+    engine.record_added_lines(added_entries);
 
     Ok(())
 }
 
 /// 在文件/Block 末尾插入新内容
+///
+/// New(End) 始终在文件级别操作，不考虑 block_stack。
 fn execute_end(engine: &mut Engine, content: NewContent) -> Result<(), NcsError> {
     let new_lines = executor::build_new_lines(&content);
     let new_line_count = new_lines.len();
 
-    if let Some(block) = engine.block_stack.last_mut() {
-        let insert_start = block.lines.len();
-        block.lines.extend(new_lines);
-        block.reindex();
+    let file = engine
+        .file
+        .as_mut()
+        .ok_or(NcsError::File(crate::error::FileError::NotFound {
+            path: "(no file opened)".to_string(),
+        }))?;
 
-        let (changed, context_above, context_below) =
-            executor::collect_added_diff_data(block, insert_start, new_line_count);
-        engine.record_diff_with_context(changed, context_above, context_below);
-    } else if let Some(ref mut file) = engine.file {
-        let insert_start = file.lines.len();
-        file.lines.extend(new_lines);
-        executor::reindex_file(file);
+    let insert_start = file.lines.len();
+    file.lines.extend(new_lines);
+    executor::reindex_file(file);
 
-        let added_entries =
-            executor::collect_new_file_line_info(file, insert_start, new_line_count);
-        engine.record_added_lines(added_entries);
-    }
+    let added_entries = executor::collect_new_file_line_info(file, insert_start, new_line_count);
+    engine.record_added_lines(added_entries);
 
     Ok(())
 }
@@ -228,6 +222,35 @@ mod tests {
         assert!(result.is_ok());
         let file = engine.file.as_ref().unwrap();
         assert_eq!(file.lines[2].content, "    raw_line");
+    }
+
+    // ============================================================
+    // BUG-401: New(Start/End) 始终在文件级别操作
+    // ============================================================
+
+    #[test]
+    fn test_new_start_operates_at_file_level_even_with_pending_location() {
+        let (_dir, mut engine) =
+            engine_with_file("// header\nfn main() {\n    old();\n}\n// footer\n");
+
+        // 先创建 Location（block_stack 非空）
+        crate::commands::location::execute(
+            &mut engine,
+            LocationMode::Normal,
+            Some(build_location_content(&["fn main() {"])),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(!engine.block_stack.is_empty());
+
+        // 执行 New(Start) — 应在文件开头，而非 block 开头
+        let content = make_new_content(&[("#![allow(warnings)]", 0, false)]);
+        let result = execute(&mut engine, NewMode::Start, content);
+        assert!(result.is_ok());
+
+        let file = engine.file.as_ref().unwrap();
+        assert_eq!(file.lines[0].content, "#![allow(warnings)]");
+        assert_eq!(file.lines[1].content, "// header");
     }
 
     /// 辅助函数：构建 LocationContent

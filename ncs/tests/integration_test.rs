@@ -93,7 +93,7 @@ fn execute_script(script: &str) -> Result<Engine, String> {
         ncs::parser::Parser::parse(tokens, &registry).map_err(|e| format!("Parser: {}", e))?;
     let mut engine = Engine::new();
     engine
-        .execute(commands)
+        .execute(commands, &registry)
         .map_err(|e| format!("Engine: {}", e))?;
     Ok(engine)
 }

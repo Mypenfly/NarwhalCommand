@@ -101,8 +101,12 @@ impl Lexer {
 
                 if token.is_block() {
                     // 提取块内容
+                    let cmd_name = match &token {
+                        Token::Command { name, .. } => name.clone(),
+                        _ => unreachable!(),
+                    };
                     let (content_lines, next_index) =
-                        Self::extract_block_content(&lines, index, registry)?;
+                        Self::extract_block_content(&lines, index, registry, &cmd_name)?;
                     tokens.push(Self::set_content_lines(token, content_lines));
                     index = next_index;
                 } else {
@@ -220,25 +224,43 @@ impl Lexer {
     /// 提取块执行命令的内容行
     ///
     /// 从命令行的下一行开始收集，直到：
+    /// - 遇到匹配当前命令名的 `@/Cmd` 关闭行
     /// - 遇到非仅展开命令的 `!@` 行
-    /// - 遇到 `@/` 关闭行
+    ///
+    /// 非匹配的 `@/Cmd` 行会作为内容行继续提取。
     ///
     /// 返回 (内容行列表, 下一处理行索引)
     fn extract_block_content(
         lines: &[&str],
         start_index: usize,
         registry: &CommandRegistry,
+        cmd_name: &str,
     ) -> Result<(Vec<String>, usize), ParseError> {
         let total = lines.len();
         let mut content_lines: Vec<String> = Vec::new();
         let mut next_index = start_index + 1;
+        let cmd_name_upper = cmd_name.to_uppercase();
 
         while next_index < total {
             let line = lines[next_index];
 
             if line.starts_with("@/") {
-                // 遇到关闭符，停止提取
-                break;
+                // 提取 @/ 后的命令名，检查是否匹配当前块命令
+                let rest = line.strip_prefix("@/").unwrap().trim();
+                let close_name = rest.split_whitespace().next().unwrap_or("");
+                // @/Open / @/Off 为根关闭符，@/Location 为块上下文关闭符；
+                // 这三者始终终止任何已开启的块内容提取。
+                // 其他 @/Cmd 仅当命令名匹配时才终止块。
+                let close_upper = close_name.to_uppercase();
+                if matches!(close_upper.as_str(), "OPEN" | "OFF" | "LOCATION")
+                    || close_upper == cmd_name_upper
+                {
+                    break;
+                }
+                // 不匹配的关闭符 — 作为内容行继续提取
+                content_lines.push(line.to_string());
+                next_index += 1;
+                continue;
             }
 
             if let Some(header) = line.strip_prefix("!@") {
@@ -719,6 +741,93 @@ mod tests {
                 assert_eq!(name, "Location");
                 assert_eq!(mode, "Block");
                 assert!(is_block);
+            }
+            _ => panic!("Expected Command token"),
+        }
+    }
+
+    // ============================================================
+    // BUG-301: @/ 块终止必须校验命令名匹配
+    // ============================================================
+
+    #[test]
+    fn test_block_does_not_terminate_on_non_matching_close() {
+        let registry = test_registry();
+        // @/New 不应终止 !@Location 块（非 Open/Off/Location + 名不匹配）
+        let script = "!@Location\nfn main() {}\n@/New\n  extra code\n@/Location";
+        let tokens = Lexer::tokenize(script, &registry).unwrap();
+        assert_eq!(tokens.len(), 2, "应该只有 2 个 token");
+        match &tokens[0] {
+            Token::Command {
+                name,
+                content_lines,
+                ..
+            } => {
+                assert_eq!(name, "Location");
+                assert_eq!(content_lines.len(), 3);
+                assert_eq!(content_lines[0], "fn main() {}");
+                assert_eq!(content_lines[1], "@/New");
+                assert_eq!(content_lines[2], "  extra code");
+            }
+            _ => panic!("Expected Command token"),
+        }
+        match &tokens[1] {
+            Token::Close { name, .. } => {
+                assert_eq!(name, "Location");
+            }
+            _ => panic!("Expected Close token for Location"),
+        }
+    }
+
+    #[test]
+    fn test_block_terminates_on_open_close_even_in_nested_block() {
+        let registry = test_registry();
+        // @/Open / @/Off / @/Location 始终终止任何块
+        let script = "!@Location\nfn main() {}\n@/Open\n!@New\n  code();\n@/New";
+        let tokens = Lexer::tokenize(script, &registry).unwrap();
+        assert_eq!(tokens.len(), 4, "应有 4 个 token");
+        match &tokens[1] {
+            Token::Close { name, .. } => assert_eq!(name, "Open"),
+            _ => panic!("Expected Close Open token"),
+        }
+    }
+
+    #[test]
+    fn test_location_close_terminates_any_block() {
+        let registry = test_registry();
+        // @/Location 作为块上下文关闭符，始终终止任何块
+        let script = "!@New\n  line 1\n@/Location";
+        let tokens = Lexer::tokenize(script, &registry).unwrap();
+        assert_eq!(tokens.len(), 2);
+        match &tokens[0] {
+            Token::Command { content_lines, .. } => {
+                assert_eq!(content_lines.len(), 1);
+                assert_eq!(content_lines[0], "  line 1");
+            }
+            _ => panic!("Expected Command token"),
+        }
+        match &tokens[1] {
+            Token::Close { name, .. } => assert_eq!(name, "Location"),
+            _ => panic!("Expected Close Location token"),
+        }
+    }
+
+    #[test]
+    fn test_delete_close_does_not_terminate_location_block() {
+        let registry = test_registry();
+        // @/Delete 不应终止 !@Location 块
+        let script = "!@Location\nfn main() {}\n@/Delete\n  still content\n@/Location";
+        let tokens = Lexer::tokenize(script, &registry).unwrap();
+        assert_eq!(tokens.len(), 2);
+        match &tokens[0] {
+            Token::Command {
+                name,
+                content_lines,
+                ..
+            } => {
+                assert_eq!(name, "Location");
+                assert_eq!(content_lines.len(), 3);
+                assert_eq!(content_lines[1], "@/Delete");
             }
             _ => panic!("Expected Command token"),
         }

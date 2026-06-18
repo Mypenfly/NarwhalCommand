@@ -34,12 +34,11 @@ pub fn execute(
         LocationMode::Normal | LocationMode::Block => {
             execute_content_match(engine, content, matches!(mode, LocationMode::Block))
         }
-        LocationMode::Path => {
-            // Phase 2.4: Path 模式待实现
-            Err(NcsError::Match(crate::error::MatchError::NoMatch {
-                location_content: "Location Path 模式尚未实现".to_string(),
-            }))
-        }
+        LocationMode::Path => Err(NcsError::Engine(
+            crate::error::EngineError::NotImplemented {
+                feature: "Location Path 模式".to_string(),
+            },
+        )),
     }
 }
 
@@ -205,5 +204,21 @@ mod tests {
             })
             .collect();
         LocationContent { lines: loc_lines }
+    }
+
+    #[test]
+    fn test_location_path_returns_not_implemented() {
+        let mut engine = Engine::new();
+        let result = execute(
+            &mut engine,
+            LocationMode::Path,
+            None,
+            &std::collections::HashMap::new(),
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NcsError::Engine(crate::error::EngineError::NotImplemented { .. }) => {}
+            other => panic!("Expected NotImplemented error, got {:?}", other),
+        }
     }
 }

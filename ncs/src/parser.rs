@@ -110,6 +110,11 @@ pub enum Command {
         /// 关闭的命令名
         name: String,
     },
+    /// Capture 指令：捕获上一个命令的输出到 pools
+    Capture {
+        /// 存入 pools 的键名
+        pool_name: String,
+    },
 }
 
 /// Open 命令的模式
@@ -206,9 +211,8 @@ impl Parser {
                 Token::Close { name, .. } => {
                     commands.push(Command::Close { name });
                 }
-                Token::Capture { .. } => {
-                    // Capture 指令暂不直接生成 Command，
-                    // Phase 2+ 中由 Engine 处理 pools 存储
+                Token::Capture { pool_name, .. } => {
+                    commands.push(Command::Capture { pool_name });
                 }
             }
         }

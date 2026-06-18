@@ -355,6 +355,8 @@ impl CommandRegistry {
                     ("Location".to_string(), vec!["Normal".to_string()]),
                     ("Location".to_string(), vec!["Block".to_string()]),
                     ("Location".to_string(), vec!["Path".to_string()]),
+                    ("Open".to_string(), vec!["Start".to_string()]),
+                    ("Open".to_string(), vec!["End".to_string()]),
                 ],
             },
         );
