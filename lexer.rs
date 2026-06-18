@@ -93,13 +93,12 @@ impl Lexer {
             let line_number = LineNumber::from_index(index);
 
             // 跳过非命令的普通行（它们已由前一个块命令的提取消费）
-            // trim_start 后检查，支持缩进的 !@ 和 @/ 命令
-            if !line.trim_start().starts_with("!@") && !line.trim_start().starts_with("@/") {
+            if !line.starts_with("!@") && !line.starts_with("@/") {
                 index += 1;
                 continue;
             }
 
-            if let Some(header) = line.trim_start().strip_prefix("!@") {
+            if let Some(header) = line.strip_prefix("!@") {
                 let token = Self::parse_command_header(header, line_number, registry)?;
 
                 if token.is_block() {
@@ -116,7 +115,7 @@ impl Lexer {
                     tokens.push(token);
                     index += 1;
                 }
-            } else if let Some(rest) = line.trim_start().strip_prefix("@/") {
+            } else if let Some(rest) = line.strip_prefix("@/") {
                 let rest = rest.trim();
                 let (cmd_name, capture) = Self::parse_close_with_capture(rest);
                 tokens.push(Token::Close {
@@ -245,13 +244,10 @@ impl Lexer {
         while next_index < total {
             let line = lines[next_index];
 
-            if line.trim_start().starts_with("@/") {
+            if line.starts_with("@/") {
                 // 提取 @/ 后的命令名，检查是否匹配当前块命令
-                let close_name = line
-                    .trim_start()
-                    .strip_prefix("@/")
-                    .map(|r| r.trim().split_whitespace().next().unwrap_or(""))
-                    .unwrap_or("");
+                let rest = line.strip_prefix("@/").unwrap().trim();
+                let close_name = rest.split_whitespace().next().unwrap_or("");
                 // @/Open / @/Off 为根关闭符，@/Location 为块上下文关闭符；
                 // 这三者始终终止任何已开启的块内容提取。
                 // 其他 @/Cmd 仅当命令名匹配时才终止块。
@@ -267,7 +263,7 @@ impl Lexer {
                 continue;
             }
 
-            if let Some(header) = line.trim_start().strip_prefix("!@") {
+            if let Some(header) = line.strip_prefix("!@") {
                 // 检查是否为仅展开命令
                 let cmd_name = header.split_whitespace().next().unwrap_or("");
 
@@ -859,50 +855,5 @@ mod tests {
             }
             _ => panic!("Expected Command token"),
         }
-    }
-
-    // ============================================================
-    // 缩进命令识别：!@ 和 @/ 前可有任意空白
-    // ============================================================
-
-    #[test]
-    fn test_indented_open_command_recognized() {
-        let registry = test_registry();
-        let tokens = Lexer::tokenize("    !@Open ./test.rs", &registry).unwrap();
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(
-            &tokens[0],
-            Token::Command {
-                name,
-                ..
-            } if name == "Open"
-        ));
-    }
-
-    #[test]
-    fn test_indented_close_command_recognized() {
-        let registry = test_registry();
-        let tokens = Lexer::tokenize("    @/Open", &registry).unwrap();
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], Token::Close { name, .. } if name == "Open"));
-    }
-
-    #[test]
-    fn test_indented_commands_in_block_extraction_preserve_content() {
-        let registry = test_registry();
-        // 模拟块内缩进命令：主命令是 !@Location，块内有缩进的子命令，
-        // 缩进的 !@New 应终止 Location 块并开始新命令
-        let script = "\
-!@Location
-fn main() {
-        !@New
-    extra();
-@/Open";
-        let tokens = Lexer::tokenize(script, &registry).unwrap();
-        // 应该有: Location 命令 + New 命令 + Close(Open) 命令
-        assert_eq!(tokens.len(), 3, "Expected 3 tokens, got {:?}", tokens);
-        assert!(matches!(&tokens[0], Token::Command { name, .. } if name == "Location"));
-        assert!(matches!(&tokens[1], Token::Command { name, .. } if name == "New"));
-        assert!(matches!(&tokens[2], Token::Close { name, .. } if name == "Open"));
     }
 }
