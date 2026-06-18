@@ -335,7 +335,7 @@ cargo test --test integration_test   # 迁移 n_edit 的测试脚本，适配新
 
 ---
 
-## Phase 3: CmdContent 数据流重构（变更追踪模型） ⏳
+## Phase 3: CmdContent 数据流重构（变更追踪模型） 🟡 桥接实现就绪
 
 **目标**：将所有命令的数据流动统一为 CmdContent + ContentChange 变更追踪模型，实现延迟应用、可追踪修改，从根本上解决 BUG-204（New/Delete 执行顺序冲突）。
 
@@ -347,46 +347,88 @@ cargo test --test integration_test   # 迁移 n_edit 的测试脚本，适配新
 命令操作 → 追加 ContentChange 记录 → Owner 关闭时 apply_changes() 统一生效
 ```
 
-### 3.0 CmdContent 扩展 + 变更追踪基础
+### 3.0 CmdContent 扩展 + 变更追踪基础 ✅ 已完成
 
-- [ ] `ContentChange` 枚举（Insert / Delete + source_cmd）
-- [ ] `ContentSource` 枚举（Block / File / CommandOutput）
-- [ ] CmdContent 新增字段：`snapshot_lines` / `snapshot_raw` / `changes` / `source_info`
-- [ ] CmdContent 新增方法：`record_insert()` / `record_delete()` / `apply_changes()`
-- [ ] `CommandResult.content` 承载 CmdContent 传递
-- [ ] `Convert() / out() / execute_core()` 三步法在 `Command` 枚举上实现
-- [ ] file_io.rs 补全（BUG-501）
+- [x] `ContentChange` 枚举（Insert / Delete + source_cmd）— `cmd_content.rs:66-87`
+- [x] `ContentSource` 枚举（Block / File / CommandOutput）— `cmd_content.rs:96-105`
+- [x] CmdContent 新增字段：`snapshot_lines` / `snapshot_raw` / `changes` / `source_info` — `cmd_content.rs:27-41`
+- [x] CmdContent 新增方法：`record_insert()` / `record_delete()` / `apply_changes()` — `cmd_content.rs:149-193`
+- [x] `CommandResult.content` 承载 CmdContent 传递 — `cmd_content.rs:231-234`
+- [x] `CommandResult` 派生 `Clone` — `cmd_content.rs:231`
+- [x] file_io.rs 补全（`read_file`, `write_file`, `path_exists`）— BUG-501 ✅
 
-### 3.1 Engine 管道重写
+### 3.1 Engine 管道重写 ✅ 桥接实现
 
-- [ ] `Engine.last_result: Option<CommandResult>` — 追踪上一个命令的输出
-- [ ] `execute()` 重写：统一的三步法管道分发
-- [ ] `apply_content_to_file()` — 将 CmdContent.changes 写到 ContentBlock/FileContent
-- [ ] `handle_close()` 整合变更生效 + Location 终端输出（BUG-403）
-- [ ] Diff 记录从 ContentChange 列表构建
-- [ ] 流输出/值输出接入 `CommandType.output`（BUG-103）
+- [x] `Engine.last_result: Option<CommandResult>` — 追踪上一个命令的输出 — `engine/mod.rs:78`
+- [x] `execute()` 重写：统一分发 `dispatch_command()` + `update_last_result()` — `engine/mod.rs:118-153`
+- [ ] `apply_content_to_file()` — 将 CmdContent.changes 写到 ContentBlock/FileContent（当前为 stub）— `engine/mod.rs`
+- [x] `handle_close()` 整合 Capture 管道语法 — `engine/mod.rs`
+- [ ] Diff 记录从 ContentChange 列表构建（当前仍用旧路径）— `engine/mod.rs`
+- [ ] 流输出/值输出接入 `CommandType.output`（BUG-103）— `engine/mod.rs`
 
-### 3.2 命令方法填充
+### 3.2 命令方法骨架 ✅ 已完成
 
-- [ ] Open: convert/out — FileContent → CmdContent(snapshot=文件行, source=File)
-- [ ] Location: convert/out — 匹配 → ContentBlock → CmdContent(snapshot=匹配行, source=Block)
-- [ ] New: execute_core — `record_insert()` 替代直接行插入（BUG-101/102）
-- [ ] Delete: execute_core — 在 snapshot 匹配 + `record_delete()` 替代直接行删除
-- [ ] 移除 `commands/{new,delete}.rs` 中的直接 ContentBlock 行操作代码
-- [ ] Bash / Read / Write 骨架实现（保留 NotImplemented）
-- [ ] Get 基本展开（从 pools 读取 + 在块提取中展开为原始字符）
+- [x] `Command::{cmd_name, mode_name}` 方法 — `parser.rs:121-146`
+- [x] `Command::Close.capture` 字段 — `parser.rs:113`
+- [x] `Token::Close.capture` 字段 + `parse_close_with_capture()` — `lexer.rs:44-50`
+- [ ] New: execute_core — `record_insert()` 替代直接行插入 **← 下一阶段 Step 2**
+- [ ] Delete: execute_core — 在 snapshot 匹配 + `record_delete()` 替代直接行删除 **← 下一阶段 Step 1**
 
-### 3.3 Pools & Capture (BUG-104/303)
+### 3.3 Pools & Capture (BUG-104/303) ✅ 已完成
 
-- [ ] Lexer: `Token::Close { capture: Option<String> }` — 管道语法解析
-- [ ] Parser: `Command::Close { capture: Option<String> }`
-- [ ] Engine: Capture 在 Close 前将 last_result 存入 pools
-- [ ] `!@Get` 实现（pools 读取 + 基本展开）
+- [x] Lexer: `Token::Close { capture: Option<String> }` — `lexer.rs:44-50`
+- [x] Parser: `Command::Close { capture: Option<String> }` — `parser.rs:113`
+- [x] Engine: `dispatch_command()` → `Command::Capture` 从 `last_result.take()` 取值 — `engine/mod.rs:171-177`
+- [x] Engine: `handle_close()` → `@/Cmd | Capture` 存入 pools — `engine/mod.rs`
+- [x] `!@Get` 基本实现（pools 读取 → `last_result`）— `engine/mod.rs:178-193`
+- [ ] `!@Get` 块内展开（在 New/Delete 块中展开为 raw_content）— `parser.rs`
+- [ ] Get `like=[!@Cmd]` 伪装模式 — Phase 5
 
-### 3.4 Location 终端输出 (BUG-403)
+### 3.4 Location 终端输出 (BUG-403) 🔴 未实现
 
 - [ ] `engine.print_location_result()` — @/Location 时输出带行号的匹配块（灰色）
 - [ ] `--verbose` 标志 CLI 暴露
+
+---
+
+### 🔴 下一阶段迁移重点（Phase 3 续）
+
+**当前状态**：Engine 层通过 `update_last_result()` 在执行后从 `engine.file` / `engine.block_stack` 反向构建 CmdContent。命令层（`commands/{new,delete,open,location}.rs`）仍直接操作 n_edit 类型。BUG-204（New 在 Delete 之前污染匹配）在旧路径下尚未修复。
+
+**迁移顺序（严格按此顺序，每步完成后回归 591 tests）**：
+
+| Step | Bug | 文件 | 内容 |
+|:----:|-----|------|------|
+| **1** | BUG-204 | `commands/delete.rs` | `execute_normal()` 改为在 `engine.last_result.content.snapshot_lines` 上匹配删除行，成功后调用 `content.record_delete()`。移除 `block.lines.drain()` 直接操作。 |
+| **2** | BUG-101/102 | `commands/new.rs` | `execute_normal()` 改为 `content.record_insert()`。移除 `block.lines` 的 splice/insert 直接操作。命令自身返回 `CommandResult`。 |
+| **3** | BUG-101/102 | `commands/open.rs`, `commands/location.rs` | 正式实现 `convert()`/`out()`，由命令自身构建 CmdContent。移除 `engine.update_last_result()` 中的 OPEN/LOCATION 桥接分支。 |
+| **4** | BUG-204 | `engine/mod.rs` | `apply_content_to_file()` 补全：读取 `last_result.content.changes` → `apply_changes()` → 转换 ContentChange 为 ContentBlock 行操作 → `reindex()` → `diff_lines` → `write_back_to_parent()`。`handle_close("LOCATION")` 中调用。 |
+| **5** | BUG-103 | `engine/mod.rs` | `dispatch_command()` 中从 `registry.find_command(&cmd_name).cmd_type.output` 读取输出类型。ValueOutput 命令的 `last_result` 不保留。 |
+| **6** | BUG-403 | `engine/mod.rs` | `print_location_result()` 实现。`handle_close("LOCATION")` 中调用。`--verbose` CLI 标志。 |
+
+**Step 1 关键细节**：
+- 匹配目标：`engine.last_result.as_ref().unwrap().content.snapshot_lines`
+- 复用现有 `find_delete_match()` 逻辑，但输入改为 `&[CmdLine]` 而非 `&ContentBlock`
+- 邻接检查：比较 snapshot 中 Location 最后一行与 Delete 首行
+- record_delete 后继续让 `commands/delete.rs` 的 `execute_normal()` 完成返回（兼容旧接口）
+- 变更生效暂由 `update_last_result()` 继续处理（Step 4 后才移至 apply_content_to_file）
+
+**Step 2 关键细节**：
+- 插入位置从 `block.match_info` 计算（不变），但改为参数传入 `record_insert()`
+- `build_new_lines()` 仍可使用，但结果作为 `Vec<CmdLine>` 传给 `record_insert()`
+- New 命令的直接 ContentBlock 操作移除，变更记录累积在 CmdContent.changes 中
+
+**Step 4 关键细节**：
+- `apply_content_to_file()` 读取 `last_result.content.changes` 和 `last_result.content.snapshot_lines`
+- 按 `ContentChange` 列表顺序，在 snapshot 上逐条应用 → 得到最终行列表
+- 最终行列表写回 `ContentBlock.lines`（或 `FileContent.lines`）
+- 调用 `block.reindex()` 重排行号
+- 从 ContentChange 构建 `diff_lines`（Insert → Added, Delete → Deleted）
+
+**反模式警告**：
+- ❌ 不要在命令 `execute()` 中同时操作 CmdContent 和 ContentBlock
+- ❌ 不要跳过 Step 1 直接做 Step 2（Delete 必须先搬迁，否则 New 搬迁后的 CmdContent 匹配逻辑不一致）
+- ❌ 不要修改 `ncs_dev.md` 中的变更追踪模型描述（已与设计一致）
 
 ### 参考文档
 
