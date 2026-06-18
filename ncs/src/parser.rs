@@ -109,12 +109,47 @@ pub enum Command {
     Close {
         /// 关闭的命令名
         name: String,
+        /// Capture 管道: @/Open | Capture pool_name
+        capture: Option<String>,
     },
     /// Capture 指令：捕获上一个命令的输出到 pools
     Capture {
         /// 存入 pools 的键名
         pool_name: String,
     },
+}
+
+impl Command {
+    /// 返回命令名（大写）
+    pub fn cmd_name(&self) -> String {
+        match self {
+            Command::Open { .. } => "OPEN".to_string(),
+            Command::Location { .. } => "LOCATION".to_string(),
+            Command::New { .. } => "NEW".to_string(),
+            Command::Delete { .. } => "DELETE".to_string(),
+            Command::Raw { .. } => "RAW".to_string(),
+            Command::Bash { .. } => "BASH".to_string(),
+            Command::Exec { .. } => "EXEC".to_string(),
+            Command::Read { .. } => "READ".to_string(),
+            Command::Write { .. } => "WRITE".to_string(),
+            Command::Include { .. } => "INCLUDE".to_string(),
+            Command::WorkPath { .. } => "WORKPATH".to_string(),
+            Command::Get { .. } => "GET".to_string(),
+            Command::Capture { .. } => "CAPTURE".to_string(),
+            Command::Close { .. } => "CLOSE".to_string(),
+        }
+    }
+
+    /// 返回模式名
+    pub fn mode_name(&self) -> String {
+        match self {
+            Command::Open { mode, .. } => format!("{:?}", mode),
+            Command::Location { mode, .. } => format!("{:?}", mode),
+            Command::New { mode, .. } => format!("{:?}", mode),
+            Command::Delete { mode, .. } => format!("{:?}", mode),
+            _ => "Normal".to_string(),
+        }
+    }
 }
 
 /// Open 命令的模式
@@ -208,8 +243,8 @@ impl Parser {
                     )?;
                     commands.push(command);
                 }
-                Token::Close { name, .. } => {
-                    commands.push(Command::Close { name });
+                Token::Close { name, capture, .. } => {
+                    commands.push(Command::Close { name, capture });
                 }
                 Token::Capture { pool_name, .. } => {
                     commands.push(Command::Capture { pool_name });
@@ -780,6 +815,7 @@ mod tests {
         assert_eq!(
             commands[0],
             Command::Close {
+                capture: None,
                 name: "Open".to_string()
             }
         );
@@ -792,12 +828,14 @@ mod tests {
         assert_eq!(
             commands[0],
             Command::Close {
+                capture: None,
                 name: "Location".to_string()
             }
         );
         assert_eq!(
             commands[1],
             Command::Close {
+                capture: None,
                 name: "Open".to_string()
             }
         );
@@ -824,6 +862,7 @@ mod tests {
         assert_eq!(
             commands[1],
             Command::Close {
+                capture: None,
                 name: "Location".to_string()
             }
         );
@@ -1134,6 +1173,7 @@ mod tests {
         assert_eq!(
             commands[1],
             Command::Close {
+                capture: None,
                 name: "New".to_string()
             }
         );
@@ -1168,6 +1208,7 @@ mod tests {
         assert_eq!(
             commands[2],
             Command::Close {
+                capture: None,
                 name: "Location".to_string()
             }
         );
@@ -1177,6 +1218,7 @@ mod tests {
         assert_eq!(
             commands[4],
             Command::Close {
+                capture: None,
                 name: "New".to_string()
             }
         );
@@ -1184,6 +1226,7 @@ mod tests {
         assert_eq!(
             commands[5],
             Command::Close {
+                capture: None,
                 name: "Open".to_string()
             }
         );

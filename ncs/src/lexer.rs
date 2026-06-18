@@ -46,6 +46,8 @@ pub enum Token {
         name: String,
         /// 所在行号
         line: LineNumber,
+        /// Capture 管道: @/Open | Capture pool_name
+        capture: Option<String>,
     },
     /// Capture 指令：捕获命令输出到 pools
     Capture {
@@ -115,14 +117,12 @@ impl Lexer {
                 }
             } else if let Some(rest) = line.strip_prefix("@/") {
                 let rest = rest.trim();
-                if let Some(capture_token) = Self::parse_capture(rest, line_number) {
-                    tokens.push(capture_token);
-                } else {
-                    tokens.push(Token::Close {
-                        name: rest.trim().to_string(),
-                        line: line_number,
-                    });
-                }
+                let (cmd_name, capture) = Self::parse_close_with_capture(rest);
+                tokens.push(Token::Close {
+                    name: cmd_name,
+                    line: line_number,
+                    capture,
+                });
                 index += 1;
             }
         }
@@ -290,21 +290,23 @@ impl Lexer {
     /// 解析 `@/Cmd | Capture pool_name` Capture 指令
     ///
     /// 返回 Some(Token::Capture) 如果是 Capture 指令，否则返回 None。
-    fn parse_capture(rest: &str, line_number: LineNumber) -> Option<Token> {
+    /// 解析 @/Cmd 行，提取命令名和可选的 Capture 管道
+    /// 返回 (cmd_name, Option<capture_pool_name>)
+    fn parse_close_with_capture(rest: &str) -> (String, Option<String>) {
         let rest = rest.trim();
         if let Some(pipe_pos) = rest.find('|') {
+            let cmd_name = rest[..pipe_pos].trim().to_string();
             let after_pipe = rest[pipe_pos + 1..].trim();
             if after_pipe.to_lowercase().starts_with("capture") {
                 let pool_name = after_pipe["capture".len()..].trim().to_string();
                 if !pool_name.is_empty() {
-                    return Some(Token::Capture {
-                        pool_name,
-                        line: line_number,
-                    });
+                    return (cmd_name, Some(pool_name));
                 }
             }
+            (cmd_name, None)
+        } else {
+            (rest.to_string(), None)
         }
-        None
     }
 }
 
@@ -573,7 +575,7 @@ mod tests {
         let tokens = Lexer::tokenize("@/Open", &registry).unwrap();
         assert_eq!(tokens.len(), 1);
         match &tokens[0] {
-            Token::Close { name, line } => {
+            Token::Close { name, line, .. } => {
                 assert_eq!(name, "Open");
                 assert_eq!(*line, 1);
             }
@@ -604,11 +606,11 @@ mod tests {
         let tokens = Lexer::tokenize("@/Open | Capture my_result", &registry).unwrap();
         assert_eq!(tokens.len(), 1);
         match &tokens[0] {
-            Token::Capture { pool_name, line } => {
-                assert_eq!(pool_name, "my_result");
-                assert_eq!(*line, 1);
+            Token::Close { name, capture, .. } => {
+                assert_eq!(name, "Open");
+                assert_eq!(capture.as_deref(), Some("my_result"));
             }
-            _ => panic!("Expected Capture token"),
+            _ => panic!("Expected Close token with capture, got {:?}", tokens[0]),
         }
     }
 
@@ -618,10 +620,11 @@ mod tests {
         let tokens = Lexer::tokenize("@/Open | capture my_pool", &registry).unwrap();
         assert_eq!(tokens.len(), 1);
         match &tokens[0] {
-            Token::Capture { pool_name, .. } => {
-                assert_eq!(pool_name, "my_pool");
+            Token::Close { name, capture, .. } => {
+                assert_eq!(name, "Open");
+                assert_eq!(capture.as_deref(), Some("my_pool"));
             }
-            _ => panic!("Expected Capture token"),
+            _ => panic!("Expected Close token with capture, got {:?}", tokens[0]),
         }
     }
 
