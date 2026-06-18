@@ -1,0 +1,73 @@
+// data.json — API 响应数据
+//
+// 真实工程风格的嵌套 JSON 数据，
+// 包含多层嵌套对象、数组、混合类型，
+// 用于验证 NCS 对 JSON 格式的编辑能力。
+
+{
+  "status": "success",
+  "code": 200,
+  "data": {
+    "user": {
+      "id": "usr_8a7b3c",
+      "email": "admin@example.com",
+      "profile": {
+        "display_name": "Admin User",
+        "avatar_url": "https://cdn.example.com/avatars/default.png",
+        "timezone": "Asia/Shanghai"
+      },
+      "preferences": {
+        "theme": "dark",
+        "language": "zh-CN",
+        "notifications": {
+          "email": true,
+          "push": false,
+          "sms": false
+        }
+      },
+      "roles": [
+        "admin",
+        "developer"
+      ],
+      "metadata": {
+        "last_login_ip": "192.168.1.100",
+        "login_count": 142,
+        "created_at": "2024-01-15T08:30:00Z",
+        "updated_at": "2026-06-18T12:45:00Z"
+      }
+    },
+    "permissions": [
+      {
+        "resource": "users",
+        "actions": ["read", "write", "delete"]
+      },
+      {
+        "resource": "config",
+        "actions": ["read", "write"]
+      },
+      {
+        "resource": "logs",
+        "actions": ["read"]
+      }
+    ],
+    "workspaces": [
+      {
+        "id": "ws_001",
+        "name": "Production",
+        "type": "production"
+      },
+      {
+        "id": "ws_002",
+        "name": "Staging",
+        "type": "staging"
+      }
+    ]
+  },
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total_items": 1,
+    "total_pages": 1
+  },
+  "timestamp": "2026-06-18T12:45:00Z"
+}

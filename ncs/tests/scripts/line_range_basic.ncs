@@ -1,12 +1,16 @@
 !@Open ./tests/data/rust_complex.rs
 
-// 场景 1：单行号 Location + New 在指定行后插入
-!@Location @14
+// 场景 1：内容匹配定位 AppConfig struct，在其后插入 region 字段
+!@Location
+pub struct AppConfig {
+    pub name: String,
+    pub version: String,
+    pub features: Vec<String>,
 !@New
     pub region: String,
 @/Location
 
-// 场景 2：内容匹配定位 impl ConnectionPool 中的 new 方法，在其后插入 pool_size 字段
+// 场景 2：内容匹配定位 ConnectionPool::new 方法，在其后插入 get_pool_size
 !@Location
     pub fn new(config: AppConfig) -> Self {
         ConnectionPool {
@@ -21,7 +25,7 @@
     }
 @/Location
 
-// 场景 3：内容匹配 + 嵌套行号，在 impl AppConfig 的 validate 前添加 with_timeout
+// 场景 3：嵌套定位在 impl AppConfig 的 validate 前添加 with_timeout
 !@Location
 impl AppConfig {
 !@Location

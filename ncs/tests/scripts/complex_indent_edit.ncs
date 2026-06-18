@@ -1,0 +1,32 @@
+!@Open ./tests/data/complex_indent.rs
+
+// 场景 1：在 process_levels 的 "large" 分支中，替换 for 循环体
+// 验证不规整缩进下的修改正确性
+!@Location
+            result.push_str("large");
+!@New
+            result.push_str("large_number");
+@/Location
+
+// 场景 2：在 check_consistency 的 Less 分支中，替换偶数格式化
+!@Location
+              results.push(format!("even_{}", i));
+!@Delete
+              results.push(format!("even_{}", i));
+!@New
+              results.push(format!("even_number_{}", i));
+@/Location
+
+// 场景 3：用嵌套 Location 精确定位 Greater 分支中的某一行
+!@Location
+            std::cmp::Ordering::Greater => {
+!@Location
+    results.push(format!("mod3_1_small_{}", count));
+!@Delete
+    results.push(format!("mod3_1_small_{}", count));
+!@New
+    results.push(format!("mod3_1_tiny_{}", count));
+@/Location
+@/Location
+
+@/Open

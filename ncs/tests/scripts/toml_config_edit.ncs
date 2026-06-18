@@ -1,0 +1,41 @@
+!@Open ./tests/data/config.toml
+
+// 场景 1：在 server section 中添加 timeout 配置
+!@Location
+[server]
+host = "0.0.0.0"
+port = 8080
+tls = false
+!@New
+timeout_secs = 30
+read_timeout_secs = 15
+@/Location
+
+// 场景 2：修改 security.password_policy 配置并添加新字段
+!@Location
+[security.password_policy]
+min_length = 8
+require_uppercase = true
+require_number = true
+require_special = false
+!@Delete
+require_special = false
+!@New
+require_special = true
+max_attempts = 5
+lockout_duration_min = 30
+@/Location
+
+// 场景 3：在 cache section 后添加新的 feature_flags section
+!@Location
+[cache.cluster]
+nodes = ["redis://node1:6379", "redis://node2:6379", "redis://node3:6379"]
+password = "${REDIS_PASSWORD}"
+!@New
+[feature_flags]
+enable_new_parser = true
+enable_parallel_exec = false
+rollout_percentage = 25
+@/Location
+
+@/Open

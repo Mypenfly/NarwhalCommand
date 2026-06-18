@@ -1,6 +1,6 @@
 # NCS Bug 清单与修复记录
 
-> **修复进度**: 第一阶段 5/5 ✅ | 第二阶段 6/6 ✅ | 尚余 10 项
+> **修复进度**: 第一阶段 5/5 ✅ | 第二阶段 6/6 ✅ | 第三阶段新发现 2 项 | 尚余 11 项
 
 ---
 
@@ -164,6 +164,46 @@ fn pop_exec_cmd(&mut self, name: &str) {
 
 ---
 
+### BUG-204: Location → Delete → New 顺序执行时 Delete 误读到 New 修改后的 Block
+
+**状态**: ⏳ 未修复  
+**严重程度**: 严重  
+**对应文档**: ncs_dev.md §5.4（Delete 执行流："在 ContentBlock 内逐行去空白匹配删除内容"）  
+**代码位置**: `ncs/src/commands/delete.rs`、`ncs/src/commands/new.rs`、`ncs/src/engine/mod.rs`
+
+**发现场景**: `scenario03_replace_func.ncs` 使用 `!@Location` → `!@Delete` → `!@New` 序列替换函数实现。Location 匹配后创建 ContentBlock，Delete 本应在该 Block 内匹配原始内容并删除，但执行时 Block 中已经包含了 New 插入的内容（`self.items.join(", ")`），导致 Delete 找不到匹配。
+
+**根本原因**: Engine 执行命令时按 AST 顺序遍历（Location → Delete → New），但 `get_search_scope()` 返回的 `ContentBlock` 是共享引用。New 命令的 `execute_normal()` 调用 `build_new_lines()` 修改了 Block，而 Delete 的 `find_delete_match()` 访问到的是已修改的 Block。初步判定为 `execute()` 方法中的命令分发顺序或 Block 引用传递存在缺陷。
+
+**复现脚本**:
+```ncs
+!@Open ./tests/data/scenarios.rs
+!@Location
+    pub fn deprecated_method(&self) -> String {
+!@Delete
+        let mut result = String::new();
+        for item in &self.items {
+            result.push_str(&format!("[{}]", item));
+        }
+        result
+!@New
+        self.items.join(", ")
+@/Open
+```
+
+**错误信息**:
+```
+Error: Delete 命令未能在当前 Block 中找到匹配内容
+  Block 内容:
+      pub fn deprecated_method(&self) -> String {
+  self.items.join(", ")          ← New 内容已出现在此处
+      }
+```
+
+**临时绕过**: 使用嵌套 Location 分开 Delete 和 New 的作用域，或分别用 `@/Location` 关闭后重新打开新的 Location。
+
+---
+
 ## 三、词法/语法分析缺陷
 
 ### BUG-301: `@/` 块终止不校验命令名匹配 ✅ 已修复
@@ -312,6 +352,23 @@ fn pop_exec_cmd(&mut self, name: &str) {
 
 ---
 
+### BUG-404: Location 内容块边界在非标准文件中识别不准确
+
+**状态**: ⏳ 未修复  
+**严重程度**: 一般  
+**对应文档**: ncs_dev.md §5.2（Location 匹配算法）、INSTRUCTION.md §3.1  
+**代码位置**: `ncs/src/matcher.rs`（`find_unique_block`）、`ncs/src/block.rs`（BlockParser）
+
+**发现场景**: `line_range_delete.ncs` 尝试删除 `rust_complex.rs` 中的 `impl Default for AppConfig` 块。该文件中 `impl Default for AppConfig` 缺少闭合 `}};`（与后续 `impl AppConfig` 无缝衔接），导致 Location 匹配的块边界不准确，Delete 无法精确删除目标块。
+
+**根本原因**: `rust_complex.rs` 是故意构造的边缘 case 文件（用于测试非标 Rust 代码），其中的 `impl Default` 不包含完整的大括号闭合。`matcher.rs` 的 `find_unique_block()` 通过前后扩展寻找块边界，但当文件结构异常时（如缺少闭合括号），块边界扩展可能跨入相邻的语法结构，导致 Delete 的作用域不精确。
+
+**影响范围**: 仅影响非标准的、语法不完整的文件。标准格式的 Rust/Go/Python/YAML/JSON/TOML 文件不受影响。
+
+**临时绕过**: 对于非标准文件，使用更小的 Location 范围（单行定位）+ `!@Delete` + `!@New` 逐行替换，而非一次性删除整个块。
+
+---
+
 ## 五、Phase 2 范围内的 stub / 未完成项
 
 ### BUG-501: `file_io.rs` 仍为 stub
@@ -386,12 +443,14 @@ Open 仅注册为 `PermissionType::FileRead`，缺少 FileWrite。
 | §6.3 exec_cmds owner 检查 | ✅ 已修复 | BUG-201 |
 | §6.3 exec_cmds 退出逻辑 | ✅ 已修复 | BUG-202 |
 | §3.2 is_independent 字段 | ❌ 未读取 | BUG-203 |
+| §5.4 Delete 执行顺序 | ❌ New 先修改 Block | BUG-204 |
 | §2.3 @/ 块终止匹配命令名 | ✅ 已修复 | BUG-301 |
 | §6.1 Capture 指令 | ✅ 已修复 | BUG-302 |
 | §5.12 Get 行内展开 | ❌ 仅 strip | BUG-303 |
 | §5.3 New Start/End 文件级 | ✅ 已修复 | BUG-401 |
 | §5.4 Delete:Block 校验 | ✅ 已修复 | BUG-402 |
 | §2.6 Location Result 打印 | ❌ 不输出 | BUG-403 |
+| §5.2 块边界在非标准文件中 | ⚠️ 不精确 | BUG-404 |
 | §2.2 file_io.rs | ❌ stub | BUG-501 |
 | §5.1 Open Dir 模式 | ⏳ stub | BUG-502 |
 | §5.2 Location Path 模式 | ⏳ stub | BUG-503 |
@@ -414,6 +473,7 @@ Open 仅注册为 `PermissionType::FileRead`，缺少 FileWrite。
 
 | Bug | 内容 |
 |-----|------|
+| BUG-204 | Location→Delete→New 执行顺序修复（Delete 读已修改的 Block） |
 | BUG-101 | CmdContent convert()/out() 模式实现 |
 | BUG-102 | CommandResult 接入命令返回 |
 | BUG-103 | 流/值输出区分接入执行路径 |
@@ -426,6 +486,7 @@ Open 仅注册为 `PermissionType::FileRead`，缺少 FileWrite。
 | Bug | 内容 |
 |-----|------|
 | BUG-203 | is_independent 实际使用或移除 |
+| BUG-404 | 非标准文件块边界识别优化 |
 | BUG-501 | file_io.rs 补全 |
 | BUG-601/602 | 权限标注对齐文档 |
 

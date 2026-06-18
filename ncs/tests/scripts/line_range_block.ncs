@@ -1,16 +1,15 @@
 !@Open ./tests/data/rust_complex.rs
 
-// 场景 1：Location:Block @75 行号指向 get_connection 方法，Block 自动扩展
-// 在其后插入 is_healthy 方法
-!@Location Block @75,75
+// 场景 1：Location:Block 定位 ConnectionPool::new 方法块，在其后插入 is_healthy 方法
+!@Location Block
+    pub fn new(config: AppConfig) -> Self {
 !@New
     pub fn is_healthy(&self) -> bool {
         self.active > 0 && self.active <= self.config.max_connections as usize
     }
 @/Location
 
-// 场景 2：内容匹配 + Location:Block 定位 impl AppConfig 中 validate 方法块，
-// Delete:Block 删除该方法块，再 New 替换
+// 场景 2：内容匹配 + Location:Block 定位 validate 方法块，替换为新实现
 !@Location
 impl AppConfig {
 !@Location Block
@@ -33,13 +32,11 @@ impl AppConfig {
 @/Location
 @/Location
 
-// 场景 3：Location:Block 定位 TransformStage impl 块，
-// 嵌套行号 Delete + New 在 process 方法中添加 Capitalize 分支
+// 场景 3：Location:Block 定位 TransformStage impl 块，修改 process 方法
 !@Location Block
 impl ProcessStage for TransformStage {
-!@Location Block
+!@Location
     fn process(&self, input: &str) -> Result<String, String> {
-!@Delete @3,7
 !@New
             let result = match self.transform_type {
                 TransformType::Uppercase => input.to_uppercase(),

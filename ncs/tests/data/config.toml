@@ -1,0 +1,62 @@
+# config.toml — 应用程序多层级配置
+#
+# 真实工程风格的 TOML 配置文件，
+# 包含多级嵌套 section、数组、内联表，
+# 用于验证 NCS 对 TOML 格式的编辑能力。
+
+[app]
+name = "narwhal"
+version = "1.0.0"
+description = "Narwhal Command Script Engine"
+
+[app.logging]
+level = "info"
+format = "json"
+output = "stdout"
+
+[app.logging.rotation]
+max_size_mb = 100
+max_files = 5
+compress = true
+
+[server]
+host = "0.0.0.0"
+port = 8080
+tls = false
+
+[server.rate_limit]
+enabled = true
+requests_per_second = 100
+burst = 200
+
+[database]
+driver = "postgres"
+url = "postgres://localhost:5432/narwhal"
+
+[database.pool]
+min_connections = 2
+max_connections = 20
+idle_timeout_secs = 300
+
+[database.replicas]
+enabled = false
+hosts = ["db-replica-1.local", "db-replica-2.local"]
+
+[cache]
+backend = "redis"
+ttl_secs = 3600
+
+[cache.cluster]
+nodes = ["redis://node1:6379", "redis://node2:6379", "redis://node3:6379"]
+password = "${REDIS_PASSWORD}"
+
+[security]
+jwt_secret = "${JWT_SECRET}"
+token_expiry_hours = 24
+allowed_origins = ["http://localhost:3000", "https://app.example.com"]
+
+[security.password_policy]
+min_length = 8
+require_uppercase = true
+require_number = true
+require_special = false

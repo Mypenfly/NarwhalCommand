@@ -1,0 +1,40 @@
+!@Open ./tests/data/data.json
+
+// 场景 1：在 user 对象中添加新字段
+!@Location
+    "profile": {
+      "display_name": "Admin User",
+      "avatar_url": "https://cdn.example.com/avatars/default.png",
+      "timezone": "Asia/Shanghai"
+!@New
+      "bio": "System administrator",
+      "department": "Engineering"
+@/Location
+
+// 场景 2：修改 notifications 偏好设置
+!@Location
+      "notifications": {
+        "email": true,
+        "push": false,
+        "sms": false
+!@Delete
+        "push": false,
+        "sms": false
+!@New
+        "push": true,
+        "sms": false,
+        "in_app": true
+@/Location
+
+// 场景 3：在 workspaces 数组中追加新工作区
+!@Location
+      "id": "ws_002",
+      "name": "Staging",
+      "type": "staging"
+!@New
+      "id": "ws_003",
+      "name": "Development",
+      "type": "development"
+@/Location
+
+@/Open

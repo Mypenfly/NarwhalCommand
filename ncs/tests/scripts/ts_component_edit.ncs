@@ -1,0 +1,58 @@
+!@Open ./tests/data/ts_component.tsx
+
+// 场景 1：在 ButtonProps 接口中添加新属性
+!@Location
+export interface ButtonProps {
+  label: string;
+  variant?: 'primary' | 'secondary' | 'danger';
+  size?: 'sm' | 'md' | 'lg';
+!@New
+  tooltip?: string;
+  ariaLabel?: string;
+@/Location
+
+// 场景 2：删除旧的 variantStyles 中的 border，替换为 outline 样式
+!@Location
+const variantStyles: Record<string, React.CSSProperties> = {
+!@Delete
+  danger: {
+    backgroundColor: '#dc2626',
+    color: '#ffffff',
+    border: 'none',
+  },
+!@New
+  danger: {
+    backgroundColor: '#ef4444',
+    color: '#ffffff',
+    outline: '2px solid #dc2626',
+  },
+  ghost: {
+    backgroundColor: 'transparent',
+    color: '#2563eb',
+    border: 'none',
+  },
+@/Location
+
+// 场景 3：替换 Spinner 组件的样式
+!@Location
+const Spinner: React.FC = () => (
+!@Delete
+  <span className="spinner" style={{ animation: 'spin 1s linear infinite' }}>
+    ⟳
+  </span>
+!@New
+  <span
+    className="spinner"
+    style={{
+      animation: 'spin 0.75s linear infinite',
+      display: 'inline-block',
+      fontSize: '1.2em',
+    }}
+    role="status"
+    aria-label="loading"
+  >
+    ⟳
+  </span>
+@/Location
+
+@/Open

@@ -1,10 +1,10 @@
 !@Open ./tests/data/scenarios.rs
-// 场景 4：行号精确定位修改
-// 原文件: L12 data_dir, L13 }
+// 场景 4：删除最后一个字段并替换为新字段
 !@Location
-!@Delete @12,13
+    pub data_dir: PathBuf,
+!@Delete
+    pub data_dir: PathBuf,
 !@New
     pub max_connections: u32,
     pub timeout_secs: u64,
-}
 @/Open

@@ -89,7 +89,9 @@ fn authenticate() -> bool {
 
 ### 2.5 仅展开命令
 
-`!@Raw` 和 `!@Get` 是仅展开命令——遇到时**不触发块终止**，其内容展开为原始字符融入父命令。
+`!@Raw` 是仅展开命令——遇到时**不触发块终止**，其内容展开为原始字符融入父命令。
+
+> **阶段说明**：`!@Get` 命令的独立语法（`!@Get pool_name [like=...]`）Phase 3+ 实现。当前 Capture 指令（`@/Cmd | Capture pool_name`）已可用，详见 §2.6。
 
 ```ncs
 !@New
@@ -99,6 +101,18 @@ fn authenticate() -> bool {
     // 即使在内容中包含 !@ 也不会被解析
 @/Open
 ```
+
+### 2.6 Capture 指令 — 捕获命令输出
+
+在关闭符号后通过管道将命令输出存入全局数据池，供后续 `!@Get` 提取：
+
+```
+@/Open | Capture my_result
+```
+
+- Capture 发生在 `@/Cmd` 行中
+- 被捕获的命令输出在退出 `exec_cmds` 前复制到 `pools`
+- 键名不可重复（重复则覆盖，打印警告）
 
 ## 3. 文件编辑命令
 
@@ -173,9 +187,11 @@ impl UserService {
 
 | 模式 | 说明 |
 |------|------|
-| `Normal`（默认） | 在 Location 匹配位置之后插入 |
-| `Start` | 在文件/Block 开头插入 |
-| `End` | 在文件/Block 末尾插入 |
+| `Normal`（默认） | 在 Location 匹配位置之后插入（需要前一个 Location） |
+| `Start` | 在文件开头插入（独立命令，不依赖 Location） |
+| `End` | 在文件末尾插入（独立命令，不依赖 Location） |
+
+> **约束**：`New Normal` 要求前一个 Location 存在于 `exec_cmds` 中。`New Start` 和 `New End` 可直接在文件级操作，无需事先执行 Location。
 
 **缩进规则**: New 内容的每行 `diff_taps` 作为绝对缩进量，以插入位置的 `taps` 为基准计算。
 
