@@ -3,7 +3,7 @@
 !@Location
 pub enum Token {
 	!@Location
-	Close {
+    Close {
         /// 关闭的命令名
         name: String,
         /// 所在行号

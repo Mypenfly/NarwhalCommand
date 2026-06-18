@@ -158,6 +158,25 @@ fn authenticate() -> bool {
 2. 对每个候选，逐行比对**去空白内容**和 **diff_taps**（相对缩进差异）
 3. 要求恰好 1 个匹配，否则报错
 
+> **⚠️ 重要：缩进必须用空格，禁止 Tab**
+>
+> `taps`（leading spaces count）只统计 ASCII 空格（`0x20`），**Tab 字符不计入 taps**。
+> 若 Location 内容行混用 Tab 和空格，会导致 `diff_taps` 计算错误，匹配失败。
+>
+> ```ncs
+> # ❌ 错误：Tab 缩进导致 taps=0，diff_taps 错位
+> !@Location
+> 	Close {           # Tab → taps=0, diff_taps=0
+>         name: String, # 空格 → taps=8, diff_taps=8  ← 文件实际是 4
+>
+> # ✅ 正确：统一用空格
+> !@Location
+>     Close {          # 4空格 → taps=4, diff_taps=0
+>         name: String,# 8空格 → taps=8, diff_taps=4 ← 与文件一致
+> ```
+>
+> 此规则适用于所有涉及缩进匹配的命令（Location、New、Delete）。`!@Raw` 行不受影响（保持原样）。
+
 ```ncs
 # 匹配单个函数签名
 !@Location

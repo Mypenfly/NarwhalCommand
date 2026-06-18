@@ -46,8 +46,8 @@ pub enum Token {
         name: String,
         /// 所在行号
         line: LineNumber,
-        /// Capture 管道: @/Open | Capture pool_name
-        capture: Option<String>,
+		/// 测试用
+		test:String,
     },
     /// Capture 指令：捕获命令输出到 pools
     Capture {
@@ -131,28 +131,6 @@ impl Lexer {
     }
 
     /// 为 Command Token 设置 content_lines
-    fn set_content_lines(token: Token, content_lines: Vec<String>) -> Token {
-        match token {
-            Token::Command {
-                name,
-                mode,
-                args,
-                positional_args,
-                line,
-                is_block,
-                ..
-            } => Token::Command {
-                name,
-                mode,
-                args,
-                positional_args,
-                line,
-                content_lines,
-                is_block,
-            },
-            other => other,
-        }
-    }
 
     /// 解析单行 `!@Cmd [mode] [args...]` 命令头部
     ///
