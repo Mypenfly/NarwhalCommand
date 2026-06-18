@@ -335,11 +335,11 @@ cargo test --test integration_test   # 迁移 n_edit 的测试脚本，适配新
 
 ---
 
-## Phase 3: CmdContent 数据流重构（变更追踪模型） 🟢 核心功能已交付
+## Phase 3: CmdContent 数据流重构（变更追踪模型） ✅ 已交付
 
 **目标**：将所有命令的数据流动统一为 CmdContent + ContentChange 变更追踪模型，实现延迟应用、可追踪修改，从根本上解决 BUG-204（New/Delete 执行顺序冲突）。
 
-**状态（2026-06-18）**：Delete 快照匹配 + New 变更记录 + 流输出控制 + Location 终端输出已交付。桥接架构（cmd 层双写 Block + CmdContent）稳定运行。待后续版本彻底化：命令签名改为返回 CommandResult + handle_close 激活延迟应用。
+**交付日期**：2026-06-18
 
 ### 核心改造
 
@@ -393,20 +393,27 @@ cargo test --test integration_test   # 迁移 n_edit 的测试脚本，适配新
 
 ---
 
-### 🟢 当前部署状态
+### 🟢 交付状态
 
-桥接架构稳定运行：cmd 层双写（直接修改 Block + CmdContent 变更记录），603 tests 通过。核心 BUG-204 已通过 snapshot_lines 匹配根本解决。
+**架构已完整切换**：cmd 层不再直接修改 ContentBlock，变更统一通过 `handle_close` 中的 `apply_content_to_file()` 延迟应用。
 
-### 🔵 下一阶段方向（Phase 3 彻底化）
+```
+Open → engine.file, last_result = CmdContent(snapshot=文件行)
+Location → block_stack.push(block), last_result = CmdContent(snapshot=block行)
+New    → record_insert() → CmdContent.changes
+Delete → 在snapshot上匹配 → record_delete() → CmdContent.changes
+@/Cmd  → handle_close → apply_content_to_file() → block.lines替换 → reindex → write_back
+```
 
-当前 cmd 层同时写 Block 和 CmdContent（双写）。下一步移除 cmd 层直接 Block 操作，统一到 handle_close 延迟应用：
+**603 tests 全部通过**（n_edit 297 + NCS 306），51 项集成测试通过。
+
+### 🔵 后续优化（非阻断）
 
 | 任务 | 涉及文件 | 说明 |
 |------|----------|------|
-| 命令签名改为返回 CommandResult | `commands/*.rs` | `execute()` → `Result<CommandResult, E>` 替代 `Result<(), E>` |
-| Open/Location 正式 convert/out | `commands/open.rs`, `location.rs` | 命令自身构建 CmdContent，移除 update_last_result 桥接 |
-| handle_close 激活延迟应用 | `engine/mod.rs` | 打开 `apply_content_to_file()` 注释，移除 cmd 层 block.lines 直接操作 |
-| Get 块内展开 + like 模式 | `parser.rs`, `engine/mod.rs` | `!@Get` 在块中展开为 raw_content
+| 命令签名改为返回 CommandResult | `commands/*.rs` | `execute()` → `Result<CommandResult, E>` 替代后补转换 |
+| `!@Get` 块内展开 + like 模式 | `parser.rs` | 在 New/Delete 块中展开 raw_content |
+| `is_independent` 清理 | `engine/mod.rs` | 实际使用或移除 |
 
 ### 参考文档
 

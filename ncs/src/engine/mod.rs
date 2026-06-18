@@ -390,15 +390,13 @@ impl Engine {
         }
 
         let upper = name.to_uppercase();
-        if upper == "LOCATION" || upper == "NEW" {
-            // 桥接阶段：cmd 层已直接修改 block，此处跳过 apply。
-            // 完整迁移后（移除 cmd 层直接操作），此处取消注释；
-            // 调用 apply_content_to_file 将 CmdContent.changes 应用到 block。
-            // if let Some(ref result) = self.last_result {
-            //     if !result.content.changes.is_empty() {
-            //         self.apply_content_to_file(&result.content.clone())?;
-            //     }
-            // }
+
+        // Phase 3 变更追踪：将 CmdContent.changes 应用到 ContentBlock
+        // 无论关闭的是 LOCATION 还是 OPEN，都需要先应用待生效的变更
+        if let Some(ref result) = self.last_result {
+            if !result.content.changes.is_empty() {
+                self.apply_content_to_file(&result.content.clone())?;
+            }
         }
 
         // Phase 3: Location 关闭时输出终端结果（--verbose）
@@ -432,7 +430,8 @@ impl Engine {
     ///
     /// 读取 CmdContent.changes 列表，通过 apply_changes() 得到最终行列表，
     /// 转换为 ContentBlock.lines 并 reindex。
-    #[allow(dead_code)] // 桥接阶段暂停调用，完整迁移后启用
+    /// Diff 由各命令在执行时收集（从原始 block 快照），此处仅负责行操作。
+    #[allow(dead_code)]
     fn apply_content_to_file(&mut self, content: &CmdContent) -> Result<(), NcsError> {
         if content.changes.is_empty() {
             return Ok(());
@@ -445,54 +444,23 @@ impl Engine {
             crate::error::EngineError::MissingLocationForNew,
         ))?;
 
-        // 转换 CmdLine → Line
         let new_lines: Vec<crate::model::Line> = temp
             .lines
             .iter()
-            .map(|cl| crate::model::Line {
-                line_num: crate::model::LineNumber::new(cl.line_num),
-                taps: 0,
-                diff_taps: 0,
-                content: cl.content.clone(),
-                stripped_content: crate::model::stripped_content(&cl.content),
-            })
-            .collect();
-
-        // 收集 diff（旧行删除 + 新行新增）
-        let old_content: Vec<String> = block.lines.iter().map(|l| l.content.clone()).collect();
-        let new_content: Vec<String> = new_lines.iter().map(|l| l.content.clone()).collect();
-
-        // 记录删除行
-        let deleted: Vec<crate::output::DiffLine> = block
-            .lines
-            .iter()
-            .filter(|l| !new_content.contains(&l.content))
-            .map(|l| crate::output::DiffLine {
-                kind: crate::output::DiffLineKind::Deleted,
-                line_number: Some(l.line_num),
-                content: l.content.clone(),
-            })
-            .collect();
-
-        // 记录新增行
-        let added: Vec<crate::output::DiffLine> = new_lines
-            .iter()
-            .filter(|l| !old_content.contains(&l.content))
-            .map(|l| crate::output::DiffLine {
-                kind: crate::output::DiffLineKind::Added,
-                line_number: Some(l.line_num),
-                content: l.content.clone(),
+            .map(|cl| {
+                let taps = crate::model::count_leading_spaces(&cl.content);
+                crate::model::Line {
+                    line_num: crate::model::LineNumber::new(cl.line_num),
+                    taps,
+                    diff_taps: 0,
+                    content: cl.content.clone(),
+                    stripped_content: crate::model::stripped_content(&cl.content),
+                }
             })
             .collect();
 
         block.lines = new_lines;
         block.reindex();
-
-        // 合并 diff（删除行 + 新增行）
-        for line in deleted.into_iter().chain(added) {
-            self.diff_lines.push(line);
-        }
-
         Ok(())
     }
 
@@ -535,6 +503,12 @@ impl Engine {
 
     /// 处理隐式关闭：脚本末尾未显式 @/Open 时自动写回
     fn handle_implicit_close(&mut self) -> Result<(), NcsError> {
+        // Phase 3: 隐式关闭前应用所有待生效变更
+        if let Some(ref result) = self.last_result {
+            if !result.content.changes.is_empty() {
+                self.apply_content_to_file(&result.content.clone())?;
+            }
+        }
         if self.file.is_some() {
             self.write_back_to_file()?;
         }
@@ -1130,10 +1104,8 @@ mod tests {
 
     #[test]
     fn test_snapshot_not_modified_by_new_before_delete() {
-        // BUG-204: 当 New 在 Delete 之前执行时，Delete 匹配使用 snapshot_lines，
-        // 不应受 New 插入影响。当前桥接实现仍使用旧版 commands/delete.rs
-        // 的直接 ContentBlock 操作路径，因此此测试预期失败。
-        // TODO: Phase 3 完成后，将此测试改为严格断言（应成功）
+        // BUG-204 严格断言：New 在前 Delete 在后，Delete 在 snapshot 上正确匹配，
+        // snapshot 不受 New 插入影响。最终文件内容应为正确的新旧混合结果。
         let (_dir, path) =
             make_temp_file("fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n");
         let mut engine = Engine::new();
@@ -1179,14 +1151,31 @@ mod tests {
         ];
 
         let result = engine.execute(commands, &registry);
-        // 当前旧版 Delete 路径仍存在 BUG-204，但 last_result 中的 changes 已正确记录
-        if result.is_err() {
-            // expected: BUG-204 not yet fixed in old code path
-            eprintln!(
-                "BUG-204 still present in legacy command path (expected): {:?}",
-                result.err()
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "BUG-204: New+Delete should succeed with snapshot matching, got {:?}",
+            result.err()
+        );
+
+        // Delete 在 snapshot 上正确匹配 'let old = 1'（不受 New 插入影响），
+        // 最终 block 内容应为 fn main + inserted + println + }
+        let file = engine.file.as_ref().expect("file should exist");
+        let contents: Vec<&str> = file
+            .lines
+            .iter()
+            .map(|l| l.stripped_content.as_str())
+            .collect();
+        assert!(
+            contents.contains(&"letinserted=42;"),
+            "inserted line should exist"
+        );
+        assert!(
+            !contents.contains(&"letold=1;"),
+            "old line should be deleted"
+        );
+        assert!(contents.contains(&"fnmain(){"), "fn main should exist");
+        // 原 4 行 + New 1 - Delete 1 = 4 行
+        assert_eq!(file.lines.len(), 4, "expected 4 lines after New+Delete");
     }
 
     #[test]

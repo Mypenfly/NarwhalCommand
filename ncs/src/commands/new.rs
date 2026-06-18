@@ -99,7 +99,7 @@ fn execute_normal(engine: &mut Engine, content: NewContent) -> Result<(), NcsErr
     let new_lines = executor::build_new_lines(&content);
     let new_line_count = new_lines.len();
 
-    // Phase 3: 在插入到 block 之前，记录变更到 CmdContent
+    // Phase 3 变更追踪：记录 Insert 变更，不再直接修改 block.lines
     if let Some(ref mut result) = engine.last_result {
         let cmd_lines: Vec<crate::cmd_content::CmdLine> = new_lines
             .iter()
@@ -112,21 +112,31 @@ fn execute_normal(engine: &mut Engine, content: NewContent) -> Result<(), NcsErr
         result.content.record_insert(after_line, cmd_lines, "NEW");
     }
 
+    // 从原始 block 收集 diff（上下文来自 block，新增行来自 new_lines）
     let (changed, context_above, context_below) = {
-        let block = engine.block_stack.last_mut().ok_or(NcsError::Engine(
+        let block = engine.block_stack.last().ok_or(NcsError::Engine(
             crate::error::EngineError::MissingLocationForNew,
         ))?;
-        if insert_pos >= block.lines.len() {
-            block.lines.extend(new_lines);
-        } else {
-            let tail = block.lines.split_off(insert_pos);
-            block.lines.extend(new_lines);
-            block.lines.extend(tail);
-        }
-        block.reindex();
-        executor::collect_added_diff_data(block, insert_pos, new_line_count)
+        let actual_insert = insert_pos.min(block.lines.len());
+        let context_above = executor::collect_block_context_above(block, actual_insert);
+        let context_below =
+            executor::collect_block_context_below(block, actual_insert.saturating_sub(1));
+        let changed: Vec<crate::output::DiffLine> = new_lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| crate::output::DiffLine {
+                kind: crate::output::DiffLineKind::Added,
+                line_number: Some(crate::model::LineNumber::new(
+                    block.start_line.to_usize() + actual_insert + i,
+                )),
+                content: l.content.clone(),
+            })
+            .collect();
+
+        (changed, context_above, context_below)
     };
 
+    let _ = new_line_count;
     engine.record_diff_with_context(changed, context_above, context_below);
     Ok(())
 }
@@ -207,14 +217,55 @@ mod tests {
         )
         .unwrap();
 
+        // 设置 last_result（模拟 engine.execute 管线）
+        let block = engine.block_stack.last().unwrap();
+        let cmd_lines: Vec<crate::cmd_content::CmdLine> = block
+            .lines
+            .iter()
+            .map(|l| crate::cmd_content::CmdLine {
+                line_num: l.line_num.to_usize(),
+                content: l.content.clone(),
+            })
+            .collect();
+        let raw = cmd_lines
+            .iter()
+            .map(|l| &l.content)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut c = crate::cmd_content::CmdContent::empty();
+        c.snapshot_lines = cmd_lines.clone();
+        c.snapshot_raw = raw.clone();
+        c.lines = cmd_lines;
+        c.raw_content = raw;
+        c.source_info = Some(crate::cmd_content::ContentSource::Block { block_index: 0 });
+        engine.last_result = Some(crate::cmd_content::CommandResult {
+            content: c,
+            is_stream: true,
+        });
+
         let content = make_new_content(&[("new_code();", 4, false)]);
         let result = execute(&mut engine, NewMode::Normal, content);
         assert!(result.is_ok());
 
-        let block = engine.block_stack.last().unwrap();
-        // 原 block 有 4 行，new_code 插入在 fn foo 之后（index 1），共 5 行
-        assert_eq!(block.lines.len(), 5);
-        assert_eq!(block.lines[1].content, "    new_code();");
+        // 变更记录在 CmdContent 中
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should exist");
+        assert_eq!(last.content.changes.len(), 1);
+        match &last.content.changes[0] {
+            crate::cmd_content::ContentChange::Insert {
+                after_line,
+                lines,
+                source_cmd,
+            } => {
+                assert_eq!(*after_line, 0);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(source_cmd, "NEW");
+            }
+            other => panic!("Expected Insert change, got {:?}", other),
+        }
     }
 
     #[test]

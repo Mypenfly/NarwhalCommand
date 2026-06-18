@@ -21,7 +21,7 @@
 use crate::engine::executor;
 use crate::engine::Engine;
 use crate::error::NcsError;
-use crate::model::{DeleteContent, Line, MatchInfo};
+use crate::model::{DeleteContent, MatchInfo};
 use crate::parser::DeleteMode;
 
 /// Delete 命令的执行入口
@@ -40,7 +40,6 @@ pub fn execute(
 ///
 /// 要求前一个 Location 也使用 Block 模式。
 fn execute_block(engine: &mut Engine) -> Result<(), NcsError> {
-    // 检查前一个 Location 是否为 Block 模式
     let location_is_block = engine
         .exec_cmds
         .iter()
@@ -54,12 +53,13 @@ fn execute_block(engine: &mut Engine) -> Result<(), NcsError> {
         ));
     }
 
-    let block = engine.block_stack.last_mut().ok_or(NcsError::Engine(
+    let block = engine.block_stack.last().ok_or(NcsError::Engine(
         crate::error::EngineError::MissingLocationForNew,
     ))?;
 
     let total = block.lines.len();
     let diff_data = if total > 0 {
+        // 从原始 block 收集 diff
         let (changed, context_above, context_below) =
             executor::collect_deleted_diff_data(block, 0, total.saturating_sub(1));
         Some((changed, context_above, context_below))
@@ -67,18 +67,20 @@ fn execute_block(engine: &mut Engine) -> Result<(), NcsError> {
         None
     };
 
-    // 保留首行行号，清空所有行
-    let first_line_num = block.start_line;
-    block.lines.clear();
-    block.lines.push(Line {
-        line_num: first_line_num,
-        taps: 0,
-        diff_taps: 0,
-        content: String::new(),
-        stripped_content: String::new(),
-    });
+    // Phase 3: 记录全部删除变更，不再直接 drain block.lines
+    if let Some(ref mut result) = engine.last_result {
+        if total > 0 {
+            result
+                .content
+                .record_delete(0, total.saturating_sub(1), "DELETE");
+        }
+    }
+
+    // 更新 match_info（handle_close 中 apply 时会重新设置 block.lines）
+    let block = engine.block_stack.last_mut().ok_or(NcsError::Engine(
+        crate::error::EngineError::MissingLocationForNew,
+    ))?;
     block.match_info = MatchInfo::DeleteAt { position: 0 };
-    block.reindex();
 
     if let Some((changed, context_above, context_below)) = diff_data {
         engine.record_diff_with_context(changed, context_above, context_below);
@@ -135,7 +137,6 @@ fn execute_normal(engine: &mut Engine, content: Option<DeleteContent>) -> Result
         if synced {
             (snapshot_start_idx, snapshot_end_idx)
         } else {
-            // 快照与 block 不同步（之前有 New 修改了 block），查找对应位置
             let start =
                 executor::map_snapshot_index_to_block_index(block, snapshot, snapshot_start_idx);
             let end =
@@ -143,10 +144,7 @@ fn execute_normal(engine: &mut Engine, content: Option<DeleteContent>) -> Result
 
             match (start, end) {
                 (Some(bs), Some(be)) if be >= bs => (bs, be),
-                (Some(bs), None) => {
-                    // 仅找到起点，假设终点紧邻起点
-                    (bs, bs + (snapshot_end_idx - snapshot_start_idx))
-                }
+                (Some(bs), None) => (bs, bs + (snapshot_end_idx - snapshot_start_idx)),
                 _ => (snapshot_start_idx, snapshot_end_idx),
             }
         }
@@ -170,23 +168,21 @@ fn execute_normal(engine: &mut Engine, content: Option<DeleteContent>) -> Result
         ));
     }
 
-    // 在删除之前收集上下文和删除行数据
+    // 从原始 block 收集 diff（删除前快照）
     let (changed, context_above, context_below) =
         executor::collect_deleted_diff_data(block, block_start_idx, block_end_idx);
 
-    // 执行删除
-    block.lines.drain(block_start_idx..=block_end_idx);
-    block.match_info = MatchInfo::DeleteAt {
-        position: block_start_idx,
-    };
-    block.reindex();
-
-    // Phase 3: 记录变更到 CmdContent（供后续 apply_changes 使用）
+    // Phase 3 变更追踪：记录变更到 CmdContent，由 handle_close 统一应用到 block
+    // 不再直接 drain block.lines
     if let Some(ref mut result) = engine.last_result {
         result
             .content
             .record_delete(snapshot_start_idx, snapshot_end_idx, "DELETE");
     }
+
+    block.match_info = MatchInfo::DeleteAt {
+        position: block_start_idx,
+    };
 
     engine.record_diff_with_context(changed, context_above, context_below);
     Ok(())
@@ -200,7 +196,7 @@ mod tests {
     use crate::parser::{Command, DeleteMode, LocationMode, OpenMode};
     use std::collections::HashMap;
 
-    /// 创建带临时文件的引擎（已执行 Open + Location）
+    /// 创建带临时文件的引擎（已执行 Open + Location），并设置 last_result
     fn engine_with_location(
         file_content: &str,
         location_lines: &[&str],
@@ -224,6 +220,45 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
+
+        // Phase 3: 设置 last_result（模拟 engine.execute 管线）
+        let block = engine.block_stack.last().unwrap();
+        let cmd_lines: Vec<crate::cmd_content::CmdLine> = block
+            .lines
+            .iter()
+            .map(|l| crate::cmd_content::CmdLine {
+                line_num: l.line_num.to_usize(),
+                content: l.content.clone(),
+            })
+            .collect();
+        let raw = cmd_lines
+            .iter()
+            .map(|l| &l.content)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut c = crate::cmd_content::CmdContent::empty();
+        c.snapshot_lines = cmd_lines.clone();
+        c.snapshot_raw = raw.clone();
+        c.lines = cmd_lines;
+        c.raw_content = raw;
+        c.source_info = Some(crate::cmd_content::ContentSource::Block { block_index: 0 });
+        engine.last_result = Some(crate::cmd_content::CommandResult {
+            content: c,
+            is_stream: true,
+        });
+
+        engine.exec_cmds.push(crate::engine::ExecutedCommand {
+            cmd_name: "OPEN".to_string(),
+            mode_name: "Normal".to_string(),
+            is_independent: false,
+        });
+        engine.exec_cmds.push(crate::engine::ExecutedCommand {
+            cmd_name: "LOCATION".to_string(),
+            mode_name: "Normal".to_string(),
+            is_independent: false,
+        });
+
         (dir, engine)
     }
 
@@ -236,10 +271,24 @@ mod tests {
         let result = execute(&mut engine, DeleteMode::Normal, Some(del));
         assert!(result.is_ok());
 
-        let block = engine.block_stack.last().unwrap();
-        // 原 4 行，删除 1 行 "bar();" → 3 行
-        assert_eq!(block.lines.len(), 3);
-        assert_eq!(block.lines[1].content, "    baz();");
+        // 变更记录在 engine.last_result.content.changes 中
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should exist after execute");
+        assert_eq!(last.content.changes.len(), 1, "should have one change");
+        match &last.content.changes[0] {
+            crate::cmd_content::ContentChange::Delete {
+                start_line,
+                end_line,
+                source_cmd,
+            } => {
+                assert_eq!(*start_line, 1);
+                assert_eq!(*end_line, 1);
+                assert_eq!(source_cmd, "DELETE");
+            }
+            other => panic!("Expected Delete change, got {:?}", other),
+        }
     }
 
     #[test]
@@ -251,17 +300,28 @@ mod tests {
         let result = execute(&mut engine, DeleteMode::Normal, Some(del));
         assert!(result.is_ok());
 
-        let block = engine.block_stack.last().unwrap();
-        assert_eq!(block.lines.len(), 2);
-        assert_eq!(block.lines[0].content, "fn foo() {");
-        assert_eq!(block.lines[1].content, "}");
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should exist");
+        assert_eq!(last.content.changes.len(), 1);
+        match &last.content.changes[0] {
+            crate::cmd_content::ContentChange::Delete {
+                start_line,
+                end_line,
+                ..
+            } => {
+                assert_eq!(*start_line, 1);
+                assert_eq!(*end_line, 2);
+            }
+            other => panic!("Expected Delete, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_delete_block_clears_block() {
         let (_dir, mut engine) =
             engine_with_location("fn foo() {\n    bar();\n    baz();\n}\n", &["fn foo() {"]);
-        // Delete:Block 要求 Location 也是 Block 模式
         engine.exec_cmds.push(crate::engine::ExecutedCommand {
             cmd_name: "LOCATION".to_string(),
             mode_name: "Block".to_string(),
@@ -271,9 +331,24 @@ mod tests {
         let result = execute(&mut engine, DeleteMode::Block, None);
         assert!(result.is_ok());
 
-        let block = engine.block_stack.last().unwrap();
-        assert_eq!(block.lines.len(), 1);
-        assert!(block.lines[0].content.is_empty());
+        // Delete:Block 记录全部删除
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should exist after block delete");
+        assert_eq!(last.content.changes.len(), 1);
+        match &last.content.changes[0] {
+            crate::cmd_content::ContentChange::Delete {
+                start_line,
+                end_line,
+                ..
+            } => {
+                assert_eq!(*start_line, 0);
+                // 4 行 block, delete all: end = 3
+                assert_eq!(*end_line, 3);
+            }
+            other => panic!("Expected Delete, got {:?}", other),
+        }
     }
 
     #[test]
@@ -502,11 +577,9 @@ mod tests {
 
     #[test]
     fn test_delete_with_empty_location_and_new_replacement() {
-        // 模拟 boundary 1: 空 Location + Delete + New（替换场景）
         let file_content = "// header\n#[test]\nfn test_config_default() {\n    let config = AppConfig::default();\n    assert_eq!(config.name, \"myapp\");\n}\n// footer\n";
         let (_dir, mut engine) = engine_with_location(file_content, &[]);
 
-        // 删除 test_config_default 函数
         let del = make_delete_content(&[
             "#[test]",
             "fn test_config_default() {",
@@ -521,9 +594,23 @@ mod tests {
             result.err()
         );
 
-        let block = engine.block_stack.last().unwrap();
-        // 原 7 行, 删 5 行, 剩 2 行
-        assert_eq!(block.lines.len(), 2);
+        // 变更应记录在 CmdContent 中
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("last_result should exist");
+        assert_eq!(last.content.changes.len(), 1);
+        match &last.content.changes[0] {
+            crate::cmd_content::ContentChange::Delete {
+                start_line,
+                end_line,
+                ..
+            } => {
+                assert_eq!(*start_line, 1);
+                assert_eq!(*end_line, 5);
+            }
+            other => panic!("Expected Delete, got {:?}", other),
+        }
     }
 
     /// 辅助
