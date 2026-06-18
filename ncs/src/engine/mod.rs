@@ -30,7 +30,7 @@ use crate::cmd_content::{CmdContent, CommandResult};
 use crate::error::NcsError;
 use crate::model::{ContentBlock, FileContent, SearchScope};
 use crate::output::DiffLine;
-use crate::parser::Command;
+use crate::parser::{Command, DeleteMode, NewMode};
 use crate::registry::{normalize_command_name, CommandRegistry};
 use std::collections::HashMap;
 
@@ -123,28 +123,48 @@ impl Engine {
         for command in &commands {
             match command {
                 Command::Close { name, capture } => {
-                    // 关闭前先应用待生效的变更
                     self.handle_close(name, capture.clone())?;
                 }
                 other => {
                     // 1. 权限检查
                     self.check_owner(command, registry)?;
 
-                    // 2. 执行命令（直接操作 engine 状态）
-                    self.dispatch_command(other)?;
+                    // 2. convert: 从前一条命令获取输入
+                    let input = self
+                        .last_result
+                        .take()
+                        .map(|r| r.content)
+                        .unwrap_or_else(CmdContent::empty);
+                    let internal = command.convert(input)?;
 
-                    // 3. 加入 exec_cmds
+                    // 3. execute_core: 核心操作
+                    let result = command.execute_core(self, internal)?;
+
+                    // 4. out: 构建输出
+                    let output = command.out(result, self);
+
+                    // 5. 确定输出类型（流/值）
+                    let output_is_stream = self.is_stream_output(other, registry);
+
+                    // 6. 设置 last_result（供下一个命令使用）
+                    if output_is_stream {
+                        self.last_result = Some(CommandResult {
+                            content: output,
+                            is_stream: true,
+                        });
+                    } else {
+                        self.last_result = None;
+                    }
+
+                    // 7. 加入 exec_cmds
                     let cmd_name = other.cmd_name();
                     if cmd_name != "RAW" && cmd_name != "CAPTURE" && cmd_name != "GET" {
                         self.exec_cmds.push(ExecutedCommand {
-                            cmd_name: cmd_name.clone(),
+                            cmd_name,
                             mode_name: other.mode_name(),
                             is_independent: false,
                         });
                     }
-
-                    // 4. 更新 last_result
-                    self.update_last_result(other, registry)?;
                 }
             }
         }
@@ -152,175 +172,17 @@ impl Engine {
         self.handle_implicit_close()
     }
 
-    /// 分发命令到对应的 executor
-    fn dispatch_command(&mut self, command: &Command) -> Result<(), NcsError> {
-        match command {
-            Command::Open { mode, path, args } => {
-                crate::commands::open::execute(self, *mode, path, args)
-            }
-            Command::Location {
-                mode,
-                content,
-                args,
-            } => crate::commands::location::execute(self, *mode, content.clone(), args),
-            Command::New { mode, content } => {
-                crate::commands::new::execute(self, *mode, content.clone())
-            }
-            Command::Delete { mode, content } => {
-                crate::commands::delete::execute(self, *mode, content.clone())
-            }
-            Command::Raw { content } => crate::commands::raw::execute(self, content),
-            Command::Capture { pool_name } => {
-                let content = self
-                    .last_result
-                    .take()
-                    .map(|r| r.content)
-                    .unwrap_or_default();
-                self.pools.insert(pool_name.clone(), content);
-                Ok(())
-            }
-            Command::Get {
-                pool_name,
-                like: _like,
-            } => {
-                let content = self.pools.get(pool_name).cloned().ok_or_else(|| {
-                    NcsError::Engine(crate::error::EngineError::NotImplemented {
-                        feature: format!("Get pool '{}' not found", pool_name),
-                    })
-                })?;
-                // 设置 last_result
-                let cmd_result = CommandResult {
-                    content,
-                    is_stream: true,
-                };
-                self.last_result = Some(cmd_result);
-                Ok(())
-            }
-            Command::Close { .. } => Ok(()), // handled in execute loop
-            _ => Err(NcsError::Engine(
-                crate::error::EngineError::NotImplemented {
-                    feature: command.cmd_name(),
-                },
-            )),
-        }
-    }
-
-    /// 更新 last_result：从命令执行后的 engine 状态构建 CmdContent
-    fn update_last_result(
-        &mut self,
-        command: &Command,
-        registry: &CommandRegistry,
-    ) -> Result<(), NcsError> {
+    /// 判断命令的输出类型是流输出还是值输出
+    fn is_stream_output(&self, command: &Command, registry: &CommandRegistry) -> bool {
         let cmd_name = command.cmd_name();
-
-        // 文件编辑命令始终为流输出（管道需要传递数据）
         let is_file_editor = matches!(cmd_name.as_str(), "OPEN" | "LOCATION" | "NEW" | "DELETE");
-
-        // 其他命令查询注册表中的输出类型
-        let output_is_stream = if is_file_editor {
-            true
-        } else {
-            registry
-                .find_command(&cmd_name)
-                .and_then(|entry| entry.cmd_type.output.as_ref())
-                .is_some_and(|ot| matches!(ot, crate::registry::OutputType::StreamOutput))
-        };
-
-        // ValueOutput 命令不保留 last_result
-        if !output_is_stream {
-            self.last_result = None;
-            return Ok(());
+        if is_file_editor {
+            return true;
         }
-
-        // 文件编辑命令：从 engine 状态构建 CmdContent
-        let content = match cmd_name.as_str() {
-            "OPEN" => {
-                if let Some(ref file) = self.file {
-                    let cmd_lines: Vec<crate::cmd_content::CmdLine> = file
-                        .lines
-                        .iter()
-                        .map(|l| crate::cmd_content::CmdLine {
-                            line_num: l.line_num.to_usize(),
-                            content: l.content.clone(),
-                        })
-                        .collect();
-                    let raw = cmd_lines
-                        .iter()
-                        .map(|l| &l.content)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let mut c = CmdContent::empty();
-                    c.snapshot_lines = cmd_lines.clone();
-                    c.snapshot_raw = raw.clone();
-                    c.lines = cmd_lines;
-                    c.raw_content = raw;
-                    c.source_info = Some(crate::cmd_content::ContentSource::File {
-                        file_path: self.file_path.clone().unwrap_or_default(),
-                    });
-                    c
-                } else {
-                    CmdContent::empty()
-                }
-            }
-            "LOCATION" => {
-                if let Some(block) = self.block_stack.last() {
-                    let block_index = self.block_stack.len() - 1;
-                    let cmd_lines: Vec<crate::cmd_content::CmdLine> = block
-                        .lines
-                        .iter()
-                        .map(|l| crate::cmd_content::CmdLine {
-                            line_num: l.line_num.to_usize(),
-                            content: l.content.clone(),
-                        })
-                        .collect();
-                    let raw = cmd_lines
-                        .iter()
-                        .map(|l| &l.content)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let mut c = CmdContent::empty();
-                    c.snapshot_lines = cmd_lines.clone();
-                    c.snapshot_raw = raw.clone();
-                    c.lines = cmd_lines;
-                    c.raw_content = raw;
-                    c.source_info = Some(crate::cmd_content::ContentSource::Block { block_index });
-                    c.is_print = true;
-                    c
-                } else {
-                    CmdContent::empty()
-                }
-            }
-            "NEW" => {
-                // New: 由 commands/new.rs 在 execute_normal 中
-                // 直接记录变更到 last_result.content（Phase 3 变更追踪），
-                // 此处仅传递已有内容。
-                self.last_result
-                    .take()
-                    .map(|r| r.content)
-                    .unwrap_or_else(CmdContent::empty)
-            }
-            "DELETE" => {
-                // Delete: 由 commands/delete.rs 在 execute_normal 中
-                // 直接记录变更到 last_result.content（Phase 3 快照匹配），
-                // 此处仅传递已有内容。
-                self.last_result
-                    .take()
-                    .map(|r| r.content)
-                    .unwrap_or_else(CmdContent::empty)
-            }
-            _ => {
-                // 非文件编辑命令：last_result 不变
-                return Ok(());
-            }
-        };
-
-        self.last_result = Some(CommandResult {
-            content,
-            is_stream: output_is_stream,
-        });
-        Ok(())
+        registry
+            .find_command(&cmd_name)
+            .and_then(|entry| entry.cmd_type.output.as_ref())
+            .is_some_and(|ot| matches!(ot, crate::registry::OutputType::StreamOutput))
     }
 
     /// 前置检查：验证当前命令的 owner 是否存在于 exec_cmds 中
@@ -601,6 +463,304 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================
+// Phase 3: Command 三步流水线（execute_core / out）
+// ============================================================
+
+impl Command {
+    /// 第二阶段：执行核心逻辑
+    ///
+    /// 从 `internal` 读取 convert 阶段准备的 pending 数据，
+    /// 执行实际操作（文件读写、匹配定位、变更记录），
+    /// 引擎状态变更通过 `engine` 传递。
+    pub fn execute_core(
+        &self,
+        engine: &mut Engine,
+        mut internal: CmdContent,
+    ) -> Result<CmdContent, NcsError> {
+        match self {
+            Command::Open { mode, path, args } => {
+                crate::commands::open::execute(engine, *mode, path, args)?;
+                Ok(internal)
+            }
+            Command::Location {
+                mode,
+                content,
+                args,
+            } => {
+                crate::commands::location::execute(engine, *mode, content.clone(), args)?;
+                Ok(internal)
+            }
+            Command::New { mode, content: _ } => {
+                // 从 pending 读取 convert 阶段转换的行列表
+                let new_lines = internal.pending_new_lines.take().ok_or_else(|| {
+                    NcsError::Engine(crate::error::EngineError::NotImplemented {
+                        feature: "New execute_core: missing pending_new_lines".to_string(),
+                    })
+                })?;
+
+                match *mode {
+                    NewMode::Start => {
+                        // Start: 直接在文件级别插入开头（桥接模式，直接修改 engine.file）
+                        let file = engine.file.as_mut().ok_or(NcsError::File(
+                            crate::error::FileError::NotFound {
+                                path: "(no file opened)".to_string(),
+                            },
+                        ))?;
+                        let insert_pos = 0;
+                        let new_line_count = new_lines.len();
+                        let tail = std::mem::take(&mut file.lines);
+                        let mut combined: Vec<crate::model::Line> = new_lines
+                            .iter()
+                            .map(|cl| crate::model::Line {
+                                line_num: crate::model::LineNumber::new(0),
+                                taps: crate::model::count_leading_spaces(&cl.content),
+                                diff_taps: 0,
+                                content: cl.content.clone(),
+                                stripped_content: crate::model::stripped_content(&cl.content),
+                            })
+                            .collect();
+                        combined.extend(tail);
+                        file.lines = combined;
+                        executor::reindex_file(file);
+
+                        let added_entries =
+                            executor::collect_new_file_line_info(file, insert_pos, new_line_count);
+                        engine.record_added_lines(added_entries);
+                    }
+                    NewMode::End => {
+                        // End: 直接在文件级别插入末尾（桥接模式，直接修改 engine.file）
+                        let file = engine.file.as_mut().ok_or(NcsError::File(
+                            crate::error::FileError::NotFound {
+                                path: "(no file opened)".to_string(),
+                            },
+                        ))?;
+                        let insert_start = file.lines.len();
+                        let new_line_count = new_lines.len();
+                        let new_file_lines: Vec<crate::model::Line> = new_lines
+                            .iter()
+                            .map(|cl| crate::model::Line {
+                                line_num: crate::model::LineNumber::new(0),
+                                taps: crate::model::count_leading_spaces(&cl.content),
+                                diff_taps: 0,
+                                content: cl.content.clone(),
+                                stripped_content: crate::model::stripped_content(&cl.content),
+                            })
+                            .collect();
+                        file.lines.extend(new_file_lines);
+                        executor::reindex_file(file);
+
+                        let added_entries = executor::collect_new_file_line_info(
+                            file,
+                            insert_start,
+                            new_line_count,
+                        );
+                        engine.record_added_lines(added_entries);
+                    }
+                    NewMode::Normal => {
+                        // Normal: 在 Location 匹配位置之后插入（变更追踪模式）
+                        let insert_pos = engine
+                            .block_stack
+                            .last()
+                            .map(|b| match &b.match_info {
+                                crate::model::MatchInfo::Location { matched_line_count } => {
+                                    *matched_line_count
+                                }
+                                crate::model::MatchInfo::DeleteAt { position } => *position,
+                                crate::model::MatchInfo::Empty => b.lines.len(),
+                            })
+                            .unwrap_or(0);
+
+                        let after_line = insert_pos.saturating_sub(1);
+
+                        // Diff: 从原始 block 收集上下文 + 新行内容
+                        if let Some(block) = engine.block_stack.last() {
+                            let actual_insert = insert_pos.min(block.lines.len());
+                            let context_above =
+                                executor::collect_block_context_above(block, actual_insert);
+                            let context_below = executor::collect_block_context_below(
+                                block,
+                                actual_insert.saturating_sub(1),
+                            );
+                            let changed: Vec<DiffLine> = new_lines
+                                .iter()
+                                .enumerate()
+                                .map(|(i, l)| DiffLine {
+                                    kind: crate::output::DiffLineKind::Added,
+                                    line_number: Some(crate::model::LineNumber::new(
+                                        block.start_line.to_usize() + actual_insert + i,
+                                    )),
+                                    content: l.content.clone(),
+                                })
+                                .collect();
+                            engine.record_diff_with_context(changed, context_above, context_below);
+                        }
+
+                        internal.record_insert(after_line, new_lines, "NEW");
+                    }
+                }
+
+                Ok(internal)
+            }
+            Command::Delete {
+                mode,
+                content: del_content,
+            } => {
+                match mode {
+                    DeleteMode::Block => {
+                        let total = internal.snapshot_lines.len();
+                        let block = engine.block_stack.last().ok_or(NcsError::Engine(
+                            crate::error::EngineError::MissingLocationForNew,
+                        ))?;
+                        let (changed, context_above, context_below) =
+                            executor::collect_deleted_diff_data(block, 0, total.saturating_sub(1));
+                        internal.record_delete(0, total.saturating_sub(1), "DELETE");
+                        engine.record_diff_with_context(changed, context_above, context_below);
+                    }
+                    DeleteMode::Normal => {
+                        let del_content = del_content.as_ref().ok_or(NcsError::Engine(
+                            crate::error::EngineError::MissingLocationForNew,
+                        ))?;
+
+                        // 在 snapshot 中匹配
+                        let (s, e) = executor::find_delete_match_in_snapshot(
+                            &internal.snapshot_lines,
+                            del_content,
+                        )
+                        .ok_or_else(|| {
+                            executor::delete_not_found_in_snapshot_error(
+                                del_content,
+                                &internal.snapshot_lines,
+                            )
+                        })?;
+
+                        // 邻接检查
+                        let block = engine.block_stack.last().ok_or(NcsError::Engine(
+                            crate::error::EngineError::MissingLocationForNew,
+                        ))?;
+                        let matched_line_count = match &block.match_info {
+                            crate::model::MatchInfo::Location { matched_line_count } => {
+                                *matched_line_count
+                            }
+                            _ => 0,
+                        };
+                        executor::check_delete_adjacency_in_snapshot(
+                            &internal.snapshot_lines,
+                            matched_line_count,
+                            s,
+                        )?;
+
+                        // Diff 收集
+                        let (changed, context_above, context_below) =
+                            executor::collect_deleted_diff_data(block, s, e);
+                        engine.record_diff_with_context(changed, context_above, context_below);
+
+                        internal.record_delete(s, e, "DELETE");
+                    }
+                }
+
+                Ok(internal)
+            }
+            Command::Raw { .. } => Ok(internal),
+            Command::Capture { pool_name } => {
+                // Capture: 从 last_result 取值存入 pools
+                let content = engine
+                    .last_result
+                    .take()
+                    .map(|r| r.content)
+                    .unwrap_or_default();
+                engine.pools.insert(pool_name.clone(), content);
+                Ok(internal)
+            }
+            Command::Get {
+                pool_name,
+                like: _like,
+            } => {
+                let content = engine.pools.get(pool_name).cloned().ok_or_else(|| {
+                    NcsError::Engine(crate::error::EngineError::NotImplemented {
+                        feature: format!("Get pool '{}' not found", pool_name),
+                    })
+                })?;
+                Ok(content)
+            }
+            _ => Err(NcsError::Engine(
+                crate::error::EngineError::NotImplemented {
+                    feature: self.cmd_name(),
+                },
+            )),
+        }
+    }
+
+    /// 第三阶段：将 execute_core 的结果格式化为下游可用的 CmdContent
+    ///
+    /// Open/Location 从 engine 状态构建带快照的 CmdContent，
+    /// New/Delete 直接透传 (changes 已在 execute_core 中记录)。
+    pub fn out(&self, result: CmdContent, engine: &Engine) -> CmdContent {
+        match self {
+            Command::Open { .. } => {
+                if let Some(ref file) = engine.file {
+                    let cmd_lines: Vec<crate::cmd_content::CmdLine> = file
+                        .lines
+                        .iter()
+                        .map(|l| crate::cmd_content::CmdLine {
+                            line_num: l.line_num.to_usize(),
+                            content: l.content.clone(),
+                        })
+                        .collect();
+                    let raw = cmd_lines
+                        .iter()
+                        .map(|l| &l.content)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let mut c = CmdContent::empty();
+                    c.snapshot_lines = cmd_lines.clone();
+                    c.snapshot_raw = raw.clone();
+                    c.lines = cmd_lines;
+                    c.raw_content = raw;
+                    c.source_info = Some(crate::cmd_content::ContentSource::File {
+                        file_path: engine.file_path.clone().unwrap_or_default(),
+                    });
+                    c
+                } else {
+                    CmdContent::empty()
+                }
+            }
+            Command::Location { .. } => {
+                if let Some(block) = engine.block_stack.last() {
+                    let block_index = engine.block_stack.len() - 1;
+                    let cmd_lines: Vec<crate::cmd_content::CmdLine> = block
+                        .lines
+                        .iter()
+                        .map(|l| crate::cmd_content::CmdLine {
+                            line_num: l.line_num.to_usize(),
+                            content: l.content.clone(),
+                        })
+                        .collect();
+                    let raw = cmd_lines
+                        .iter()
+                        .map(|l| &l.content)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let mut c = CmdContent::empty();
+                    c.snapshot_lines = cmd_lines.clone();
+                    c.snapshot_raw = raw.clone();
+                    c.lines = cmd_lines;
+                    c.raw_content = raw;
+                    c.source_info = Some(crate::cmd_content::ContentSource::Block { block_index });
+                    c.is_print = true;
+                    c
+                } else {
+                    CmdContent::empty()
+                }
+            }
+            Command::Get { .. } => result,
+            _ => result,
+        }
     }
 }
 

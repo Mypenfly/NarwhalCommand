@@ -46,6 +46,12 @@ pub struct CmdContent {
 
     /// 数据来源信息（决定变更写回目标：ContentBlock / FileContent / 命令输出）
     pub source_info: Option<ContentSource>,
+
+    // === 三步流水线内部字段（convert → execute_core 数据传递） ===
+    /// 待插入的行列表（New convert 阶段从 NewContent 转换，execute_core 阶段消费）
+    pub pending_new_lines: Option<Vec<CmdLine>>,
+    /// 待删除的行列表（Delete convert 阶段从 DeleteContent 转换，execute_core 阶段消费）
+    pub pending_delete_lines: Option<Vec<CmdLine>>,
 }
 
 /// 通用的行数据结构
@@ -125,6 +131,8 @@ impl CmdContent {
             snapshot_raw: String::new(),
             changes: Vec::new(),
             source_info: None,
+            pending_new_lines: None,
+            pending_delete_lines: None,
         }
     }
 
@@ -149,6 +157,8 @@ impl CmdContent {
             snapshot_raw: String::new(),
             changes: Vec::new(),
             source_info: None,
+            pending_new_lines: None,
+            pending_delete_lines: None,
         }
     }
 

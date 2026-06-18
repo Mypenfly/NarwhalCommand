@@ -100,13 +100,16 @@ fn execute_normal(engine: &mut Engine, content: Option<DeleteContent>) -> Result
 
     // 优先从 last_result.snapshot_lines 匹配（Phase 3 快照路径），
     // 若不可用则回退到 block-based 匹配。
-    let use_snapshot = engine
-        .last_result
-        .as_ref()
-        .is_some_and(|r| !r.content.snapshot_lines.is_empty());
+    let snapshot_lines: Option<&[crate::cmd_content::CmdLine]> =
+        engine.last_result.as_ref().and_then(|r| {
+            if r.content.snapshot_lines.is_empty() {
+                None
+            } else {
+                Some(r.content.snapshot_lines.as_slice())
+            }
+        });
 
-    let (snapshot_start_idx, snapshot_end_idx) = if use_snapshot {
-        let snapshot = &engine.last_result.as_ref().unwrap().content.snapshot_lines;
+    let (snapshot_start_idx, snapshot_end_idx) = if let Some(snapshot) = snapshot_lines {
         let (s, e) = executor::find_delete_match_in_snapshot(snapshot, &del_content)
             .ok_or_else(|| executor::delete_not_found_in_snapshot_error(&del_content, snapshot))?;
 
@@ -126,8 +129,7 @@ fn execute_normal(engine: &mut Engine, content: Option<DeleteContent>) -> Result
     // 将快照索引映射到 block.lines 中的实际位置。
     // 若快照与 block 内容一致（无先前修改），直接使用快照索引。
     // 否则通过去空白内容逐行搜索对应位置。
-    let (block_start_idx, block_end_idx) = if use_snapshot {
-        let snapshot = &engine.last_result.as_ref().unwrap().content.snapshot_lines;
+    let (block_start_idx, block_end_idx) = if let Some(snapshot) = snapshot_lines {
         let synced = snapshot.len() == block.lines.len()
             && snapshot
                 .iter()

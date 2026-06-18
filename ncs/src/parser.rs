@@ -150,6 +150,39 @@ impl Command {
             _ => "Normal".to_string(),
         }
     }
+
+    // === Phase 3 三步流水线 ===
+
+    /// 第一阶段：将上游 CmdContent 转换为内部 pipeline 状态
+    ///
+    /// 对于 New/Delete 命令，解析命令自身的内容为 CmdLine 列表。
+    /// 对于 Open/Location，不附加额外数据（execute_core 直接从 self 读取）。
+    pub fn convert(
+        &self,
+        mut input: crate::cmd_content::CmdContent,
+    ) -> Result<crate::cmd_content::CmdContent, crate::error::NcsError> {
+        match self {
+            Command::Open { .. } => Ok(crate::cmd_content::CmdContent::empty()),
+            Command::Location { .. } => Ok(input),
+            Command::New {
+                content: new_content,
+                ..
+            } => {
+                let cmd_lines: Vec<crate::cmd_content::CmdLine> = new_content
+                    .lines
+                    .iter()
+                    .map(|nl| crate::cmd_content::CmdLine {
+                        line_num: 0,
+                        content: nl.content.clone(),
+                    })
+                    .collect();
+                input.pending_new_lines = Some(cmd_lines);
+                Ok(input)
+            }
+            Command::Delete { .. } => Ok(input),
+            _ => Ok(input),
+        }
+    }
 }
 
 /// Open 命令的模式
@@ -1230,5 +1263,94 @@ mod tests {
                 name: "Open".to_string()
             }
         );
+    }
+
+    // ============================================================
+    // Phase 3: convert/execute_core/out 三步流水线
+    // ============================================================
+
+    use crate::cmd_content::CmdContent;
+
+    fn make_empty_content() -> CmdContent {
+        CmdContent::empty()
+    }
+
+    #[test]
+    fn test_convert_open_returns_empty() {
+        let cmd = Command::Open {
+            mode: OpenMode::Normal,
+            path: "./test.rs".to_string(),
+            args: HashMap::new(),
+        };
+        let input = make_empty_content();
+        let result = cmd.convert(input).unwrap();
+        assert!(result.lines.is_empty());
+        assert!(result.raw_content.is_empty());
+    }
+
+    #[test]
+    fn test_convert_location_passes_input() {
+        let cmd = Command::Location {
+            mode: LocationMode::Normal,
+            content: Some(LocationContent {
+                lines: vec![LocationLine {
+                    index: 0,
+                    diff_taps: Some(0),
+                    content: "fn main() {".to_string(),
+                    line_num: None,
+                }],
+            }),
+            args: HashMap::new(),
+        };
+        let input = make_empty_content();
+        let result = cmd.convert(input).unwrap();
+        assert!(result.lines.is_empty());
+    }
+
+    #[test]
+    fn test_convert_new_stores_new_lines() {
+        let cmd = Command::New {
+            mode: NewMode::Normal,
+            content: NewContent {
+                lines: vec![NewLine {
+                    diff_taps: 0,
+                    content: "new_code();".to_string(),
+                    is_raw: false,
+                }],
+            },
+        };
+        let input = make_empty_content();
+        let result = cmd.convert(input).unwrap();
+        assert!(result.pending_new_lines.is_some());
+        let lines = result.pending_new_lines.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].content, "new_code();");
+    }
+
+    #[test]
+    fn test_convert_delete_passes_through() {
+        let cmd = Command::Delete {
+            mode: DeleteMode::Normal,
+            content: Some(DeleteContent {
+                lines: vec![DeleteLine {
+                    content: "old_code();".to_string(),
+                    is_raw: false,
+                }],
+            }),
+        };
+        let input = make_empty_content();
+        let result = cmd.convert(input).unwrap();
+        assert!(result.lines.is_empty());
+    }
+
+    #[test]
+    fn test_convert_raw_passes_through() {
+        let cmd = Command::Raw {
+            content: "raw content".to_string(),
+        };
+        let mut input = CmdContent::empty();
+        input.raw_content = "upstream".to_string();
+        let result = cmd.convert(input).unwrap();
+        assert_eq!(result.raw_content, "upstream");
     }
 }

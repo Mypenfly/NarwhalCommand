@@ -91,7 +91,7 @@ fn authenticate() -> bool {
 
 `!@Raw` 是仅展开命令——遇到时**不触发块终止**，其内容展开为原始字符融入父命令。
 
-> **阶段说明**：`!@Get` 命令的独立语法（`!@Get pool_name [like=...]`）Phase 3+ 实现。当前 Capture 指令（`@/Cmd | Capture pool_name`）已可用，详见 §2.6。
+> **阶段说明**：`!@Get pool_name` 基本读取已可用（从 pools 提取内容）。`!@Get` 的块内展开和 `like=[!@Cmd]` 伪装模式见 Phase 5。
 
 ```ncs
 !@New
@@ -342,17 +342,17 @@ Error: <标题>
 
 ## 7. 开发命令
 
-以下命令 Phase 3+ 实现：
+以下命令 Phase 4+ 实现：
 
-| 命令 | 功能 |
-|------|------|
-| `Bash` | 执行 bash 命令（安全审查） |
-| `Exec` | 直连终端执行 |
-| `Read` | 读取文件并高亮显示 |
-| `Write` | 将块内容写入文件 |
-| `Include` | 动态导入外部命令 |
-| `WorkPath` | 设置工作路径 |
-| `Get` | 从数据池获取内容 |
+| 命令 | 功能 | 状态 |
+|------|------|:----:|
+| `Bash` | 执行 bash 命令（安全审查） | Phase 4 |
+| `Exec` | 直连终端执行 | Phase 4 |
+| `Read` | 读取文件并高亮显示 | Phase 4 |
+| `Write` | 将块内容写入文件 | Phase 4 |
+| `Include` | 动态导入外部命令 | Phase 4 |
+| `WorkPath` | 设置工作路径 | Phase 4 |
+| `Get` (高级) | `like=...` 伪装模式 + 块内展开 | Phase 5 |
 
 ## 8. 参考文档
 
