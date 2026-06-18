@@ -1,0 +1,41 @@
+N_Edit — Annotation-Driven Code Editing Tool
+
+A declarative code editing tool that uses annotation-prefixed commands.
+
+Overview
+
+N_Edit reads .ned script files containing annotated edit instructions
+and applies precise modifications to target source code files.
+
+Unlike traditional text-based search-and-replace, N_Edit uses a
+semantic matching algorithm that ignores whitespace differences
+during matching while respecting indentation structure.
+
+Installation
+
+Install via cargo from the project root directory:
+
+cargo build --release
+
+The binary will be available at target/release/n_edit.
+
+Usage Example
+
+Create a .ned script file with your edit instructions, then run:
+
+n_edit path/to/script.ned
+
+The script specifies which file to open, where to make changes,
+and what those changes should be.
+
+Error Handling
+
+N_Edit provides detailed error messages with context and suggestions.
+All modifications are done in memory first, so the original file
+remains untouched if any error occurs during execution.
+
+Supported Languages
+
+The tool currently supports brace-based languages like Rust, C, and
+JavaScript, as well as indentation-based languages like Python and YAML.
+Plain text and Markdown files can be edited using Location without Block.

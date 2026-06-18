@@ -27,21 +27,22 @@
 | `ncs/src/error.rs` | 完整 | ~780 | NcsError + 6 个子错误枚举 + 单元测试 |
 | `ncs/src/cmd_content.rs` | 完整 | ~200 | 命令间数据传递 + 单元测试 |
 | `ncs/src/registry.rs` | 完整 | ~810 | 命令注册表 + 12 内置命令初始化 + 单元测试 |
-| `ncs/src/lexer.rs` | Stub | ~60 | Phase 1 实现 |
-| `ncs/src/parser.rs` | Stub | ~150 | Phase 1 实现（含完整 AST 定义） |
+| `ncs/src/lexer.rs` | 完整 | ~750 | Phase 1: Token 流生成 + 块内容提取 |
+| `ncs/src/parser.rs` | 完整 | ~1190 | Phase 1: Command AST 构建 + 内容解析 |
 | `ncs/src/engine.rs` | Stub | ~80 | Phase 2 实现（含 exec_cmds/pools 结构） |
-| `ncs/src/matcher.rs` | Stub | ~40 | Phase 2 从 n_edit 迁移 |
-| `ncs/src/block.rs` | Stub | ~20 | Phase 2 从 n_edit 迁移 |
-| `ncs/src/output.rs` | Stub | ~20 | Phase 2 从 n_edit 迁移 |
+| `ncs/src/matcher.rs` | 完整 | ~660 | Phase 2: Location 匹配算法（19 tests） |
+| `ncs/src/block.rs` | 完整 | ~640 | Phase 2: Block 解析器（19 tests） |
+| `ncs/src/output.rs` | 完整 | ~410 | Phase 2: 终端输出格式化（10 tests） |
 | `ncs/src/file_io.rs` | Stub | ~15 | Phase 2 实现 |
-| `ncs/src/commands/mod.rs` | Stub | ~15 | 命令模块入口 |
+| `ncs/src/commands/mod.rs` | Stub | ~15 | 命令模块入口（待实现各命令文件） |
+| `ncs/src/engine/` | 待建 | — | Phase 2: executor.rs 等引擎辅助模块 |
 | `ncs/tests/integration_test.rs` | 基础 | ~55 | 4 个基础验证用例 |
 
 ### 验证结果
 
 ```bash
 cargo build              ✅
-cargo test --workspace   ✅ (67 ncs + 49 n_edit + 4 integration)
+cargo test --workspace   ✅ (166 ncs + 49 n_edit + 4 integration)
 cargo clippy -- -D warnings  ✅
 cargo fmt --check        ✅
 cargo run -- file.ncs    ✅ 加载成功
@@ -98,35 +99,59 @@ cargo test -p ncs -- parser
 cargo run -p ncs -- tests/scripts/minimal.ncs --verbose
 ```
 
-## Phase 1: Lexer + Parser — 词法和语法分析
+## Phase 1: Lexer + Parser — 词法和语法分析 ✅ 已完成
 
 **目标**：实现新的 `!@Cmd` 语法识别和命令解析。
 
 ### 1.1 Lexer — 词法分析
 
-- [ ] 识别 `!@Cmd` 标识符前缀
-- [ ] 识别命令名、模式、参数：
+- [x] 识别 `!@Cmd` 标识符前缀
+- [x] 识别命令名、模式、参数：
   - 按空格分割 → `[Cmd, pre_mode, args...]`
   - `pre_mode` 尝试在 CommandRegistry 中查找对应的命令模式注册表
-- [ ] 区分行执行和块执行命令：
+- [x] 区分行执行和块执行命令：
   - 行执行 → 不提取后续行
   - 块执行 → 提取后续行直到终止条件（下一个非仅展开命令 / `@/Cmd`）
-- [ ] 识别关闭符号 `@/Cmd`
-- [ ] 识别 Capture 指令：`@/Open | Capture pool_name`
-- [ ] 输出 Token 枚举：`Command` / `Close` / `Capture`
-- [ ] Token 含行号信息，供错误定位
+- [x] 识别关闭符号 `@/Cmd`
+- [x] 识别 Capture 指令：`@/Open | Capture pool_name`
+- [x] 输出 Token 枚举：`Command` / `Close` / `Capture`
+- [x] Token 含行号信息，供错误定位
 
 ### 1.2 Parser — 语法分析
 
-- [ ] 消费 Token 流，在 CommandRegistry 中查找命令定义
-- [ ] 根据命令的模式注册表匹配模式，解析 args
-- [ ] 缺失必要参数 → 报 `ParamMissing` 错误
-- [ ] 多余参数 → 警告但继续执行
-- [ ] 构建 Command AST（见 INSTRUCTION.md §2.4）
-- [ ] 校验 `!@Write Raw` 作为特殊模式
-- [ ] `!@Raw` → 融入上一个 New/Delete 的 ContentLines，标记 `is_raw`
+- [x] 消费 Token 流，在 CommandRegistry 中查找命令定义
+- [x] 根据命令的模式注册表匹配模式，解析 args
+- [x] 缺失必要参数 → 报 `ParamMissing` 错误
+- [x] 多余参数 → 警告但继续执行
+- [x] 构建 Command AST（见 INSTRUCTION.md §2.4）
+- [x] 校验 `!@Write Raw` 作为特殊模式
+- [x] `!@Raw` → 融入上一个 New/Delete 的 ContentLines，标记 `is_raw`
 
-**Phase 1 暂不实现**：Location/New/Delete 的内容解析（从 n_edit 迁移的 parser 逻辑将在 Phase 2 整合）。
+**超范围交付**：Location/New/Delete 的内容解析（`parse_location_content` 等）已实现在 parser.rs 中。
+
+### 验证结果
+
+```bash
+cargo test -p ncs -- lexer   ✅ 22 tests
+cargo test -p ncs -- parser  ✅ 29 tests
+cargo clippy -- -D warnings  ✅
+cargo fmt --check            ✅
+```
+
+### 交付文件清单（Phase 1 完成后更新）
+
+| 文件 | 状态 | 行数 | 测试数 | 说明 |
+|------|:----:|------|:------:|------|
+| `ncs/src/lexer.rs` | 完整 | ~750 | 22 | Token 流生成 + 块内容提取 |
+| `ncs/src/parser.rs` | 完整 | ~1190 | 29 | Command AST 构建 + 内容解析 |
+| `ncs/src/matcher.rs` | 完整 | ~660 | 19 | Location 匹配算法 |
+| `ncs/src/block.rs` | 完整 | ~640 | 19 | Block 解析器 |
+| `ncs/src/output.rs` | 完整 | ~410 | 10 | 终端输出格式化 |
+| `ncs/src/engine/executor.rs` | 完整 | ~570 | 14 | 引擎纯函数辅助 |
+| `ncs/src/engine/mod.rs` | 基础 | ~90 | — | Engine 结构体 |
+| `ncs/src/commands/` | 待实现 | — | — | 各命令执行文件 |
+
+**全量测试**: 173 lib + 3 main + 4 integration = 180 tests passed
 
 ### 文档参考
 
@@ -150,29 +175,45 @@ cargo run -- tests/scripts/minimal.ncs   # 基本 Token 识别
 
 ---
 
-## Phase 2: 迁移 n_edit 核心命令（Open / Location / New / Delete / Raw）
+## Phase 2: 迁移 n_edit 核心命令（Open / Location / New / Delete / Raw） ✅ 已完成
 
 **目标**：将 n_edit 已有的稳定命令逻辑迁移到 NCS 框架。
 
-### 2.1 从 n_edit 直接迁移的模块
+### 2.1 从 n_edit 直接迁移的模块 ✅ 已完成
 
-以下模块几乎不需要修改，直接复制到新项目中：
+- [x] `model.rs` — `FileContent`、`ContentBlock`、`LocationContent`、`NewContent`、`DeleteContent`、`LineRange`（Phase 0 已迁移）
+- [x] `block.rs` — Block 解析器（BraceScanner, parse_brace_block, parse_indent_block, detect_language）— 19 tests
+- [x] `matcher.rs` — Location 匹配算法（SearchScope, rows_match, expect_single_match）— 19 tests
+- [x] `output.rs` — DiffLine, OutputFormatter, format_error — 10 tests
 
-- [ ] `matcher.rs` — Location 匹配算法（SearchScope, rows_match, expect_single_match）
-- [ ] `block.rs` — Block 解析器（BraceScanner, parse_brace_block, parse_indent_block, detect_language）
-- [ ] `model.rs` 中的 `FileContent`、`ContentBlock`、`LocationContent`、`NewContent`、`DeleteContent`、`LineRange`
-- [ ] `output.rs` — DiffLine, OutputFormatter, format_error
+### 2.2 引擎拆分重构迁移 (进行中)
 
-### 2.2 适配改造
+**n_edit 的 engine.rs 达 3083 行，严重超出项目 1200 行限制。迁移时按职责拆分为：**
 
-- [ ] `model.rs`：`Line` 保持，新增 `Line::stripped_content()` 方法，保留 `reindex()` 逻辑
-- [ ] `engine.rs` 适配新框架：
-  - Open → 加载文件为 `CmdContent`，加入 `exec_cmds`
-  - Location → 从 `CmdContent` convert 到内部结构，调用 matcher/block 匹配
-  - New / Delete → 从 `CmdContent` convert 到内部结构，执行插入/删除
-  - 每个命令执行完毕后 `out()` 输出 `CmdContent`
-- [ ] 实现 `@/Cmd` 关闭符号的处理
-- [ ] 实现 `exec_cmds` 的加入/退出管理
+| 文件 | 职责 | 预估行数 | 状态 |
+|------|------|----------|:----:|
+| `engine/mod.rs` | Engine 结构体、状态管理（block_stack/file/exec_cmds/pools）、命令分发路由、生命周期（exec_cmds 加入/退出、隐式关闭） | ~300 | 🟡 结构体就绪 |
+| `engine/executor.rs` | 引擎辅助方法：get_search_scope, apply_block_to_file, reindex_file, build_new_lines, diff 收集、delete 匹配等共享逻辑 | ~570 | ✅ 14 tests |
+| `commands/open.rs` | Open 命令：Normal（start/end）和 Dir（depth/ignore/filter）模式 | ~250 | ⏳ |
+| `commands/location.rs` | Location 命令：Normal/Block/Path 模式，调用 matcher/block，嵌套支持 | ~300 | ⏳ |
+| `commands/new.rs` | New 命令：Normal/Start/End 模式，缩进计算、reindex、流输出同步 | ~200 | ⏳ |
+| `commands/delete.rs` | Delete 命令：Normal/Block 模式，邻接检查、连续匹配、reindex、流输出同步 | ~200 | ⏳ |
+| `commands/raw.rs` | Raw 命令：仅展开，融入父命令内容 | ~60 | ⏳ |
+
+**核心原则**：Location/New/Delete 的关键算法逻辑**不变动**，确保 n_edit/tests/scripts/ 的原有 .ned 脚本操作结果仍然可行且可靠。
+
+**n_edit engine.rs 核心逻辑到 NCS 的映射**：
+
+| n_edit 方法 | NCS 位置 | 说明 |
+|------------|----------|------|
+| `execute_open()` | `commands/open.rs` | 新增 Dir 模式、start/end 参数 |
+| `execute_location()` | `commands/location.rs` | 新增 Path 模式、移除行号定位 |
+| `execute_new()` | `commands/new.rs` | Normal/Start/End 模式，保留缩进逻辑 |
+| `execute_delete()` | `commands/delete.rs` | Normal/Block 模式，保留邻接/连续检查 |
+| `execute_off()` / `handle_implicit_off()` | `engine.rs` | 适配 `Close { name }` 和 exec_cmds 退出 |
+| `get_search_scope()`, `apply_block_to_file()`, `reindex_file()`, `build_new_lines()` | `engine/executor.rs` | 共享辅助函数 |
+| `find_delete_match()`, `check_delete_adjacency()`, `lines_continuously_match()` | `engine/executor.rs` | Delete 专用辅助 |
+| `collect_block_context_above/below()`, `record_diff_with_context()`, `insert_separator_if_needed()` | `engine/executor.rs` | Diff 收集辅助 |
 
 ### 2.3 Open 命令增强
 
@@ -198,6 +239,74 @@ cargo run -- tests/scripts/minimal.ncs   # 基本 Token 识别
 - [ ] Location 的 `@/Location` 触发打印 `LocationResult`（带文件路径和行号，灰色内容）
 - [ ] New 执行后同步修改 `LocationResult`（新增行 `+` 绿色）
 - [ ] Delete 执行后同步修改 `LocationResult`（删除行 `-` 红色）
+
+### 当前进度
+
+| 步骤 | 状态 | 测试数 |
+|------|:----:|:------:|
+| 2.1 直接迁移（model/block/matcher/output） | ✅ | 48 tests |
+| 2.2 引擎拆分重构 | ✅ | — |
+| engine/executor.rs | ✅ | 14 tests |
+| engine/mod.rs | ✅ | 命令分发 + 生命周期 |
+| commands/raw.rs | ✅ | 2 tests |
+| commands/open.rs | ✅ | 5 tests |
+| commands/location.rs | ✅ | 5 tests |
+| commands/new.rs | ✅ | 5 tests |
+| commands/delete.rs | ✅ | 5 tests |
+| 测试迁移（40 .ned → .ncs + 集成测试） | ✅ | 30 tests |
+
+**全量验证**: 195 lib + 3 main + 30 integration = **228 tests**, clippy 0 warnings, fmt clean
+
+### 引擎拆分结果
+
+| 文件 | 行数 | 说明 |
+|------|------|------|
+| `engine/mod.rs` | ~280 | Engine 结构体、状态管理、命令分发路由、exec_cmds/block_stack 生命周期 |
+| `engine/executor.rs` | ~570 | 纯函数：delete 匹配、文件/Block 写回、diff 收集、reindex |
+| `commands/raw.rs` | ~60 | Raw 仅展开命令 |
+| `commands/open.rs` | ~160 | Open Normal 模式（含 start/end） |
+| `commands/location.rs` | ~210 | Location Normal/Block 模式 + 嵌套支持 |
+| `commands/new.rs` | ~230 | New Normal/Start/End 模式 |
+| `commands/delete.rs` | ~240 | Delete Normal/Block 模式 |
+
+**全部文件行数均 ≤ 600，符合项目规范（≤1200，建议 ≤800）**
+
+### 测试迁移结果
+
+| 类别 | 数量 | 说明 |
+|------|:----:|------|
+| .ned → .ncs 脚本 | 40 | 通过 Python 转换器自动转换 |
+| 集成测试 | 30 | 从 n_edit 端到端测试迁移，覆盖 Phase 1-3 |
+| 测试数据文件 | 11 | 直接复制，包含 Rust/Python/YAML/Markdown/TXT |
+| 已移入待实现 | 1 | multi_op_refactor（依赖 Phase 5 行号 Delete） |
+
+### 核心验证结果
+
+n_edit 的关键算法逻辑在 NCS 中保持一致：
+- **Location 匹配**: find_unique_block, rows_match, stripped_content, diff_taps — 不变
+- **Block 解析**: BraceScanner, detect_language, parse_brace_block, parse_indent_block — 不变
+- **New 插入**: build_new_lines, reindex, is_raw 处理 — 不变
+- **Delete 操作**: find_delete_match, check_delete_adjacency, lines_continuously_match — 不变
+- **文件写回**: apply_block_to_file, apply_block_to_parent, write_back_to_file — 不变
+- **Diff 输出**: DiffLine, format_diff_lines, format_error — 不变
+
+### 验证策略
+
+**核心验证**：n_edit/tests/scripts/ 下的 .ned 脚本通过语法转换后，在 NCS 中执行结果**必须与 n_edit 一致**。
+
+转换规则：
+| n_edit | NCS |
+|--------|-----|
+| `//!@Open: path` | `!@Open path` |
+| `//!@Location:` | `!@Location` |
+| `//!@New:` | `!@New` |
+| `//!@Delete:` | `!@Delete` |
+| `//!@Raw:` | `!@Raw` |
+| `...` 分隔符 | 自动块提取（无显式分隔符） |
+| `//!@Off:Open` | `@/Open` |
+| `//!@Off:Location` | `@/Location` |
+
+转换后的 .ncs 脚本放入 `ncs/tests/scripts/`，在集成测试中端到端验证。
 
 ### 文档参考
 
@@ -226,7 +335,22 @@ cargo test --test integration_test   # 迁移 n_edit 的测试脚本，适配新
 
 ---
 
-## Phase 3: 新增独立命令（Bash / Exec / Read / Write）
+## Phase 3: 新增独立命令（Bash / Exec / Read / Write） ⏳
+
+**目标**：实现 NCS 的新独立命令。
+
+### 实现路径提示
+
+**前置条件**：Phase 2 核心命令已稳定，Engine 分发路由已就绪。
+**当前 Engine 状态**：Bash/Exec/Read/Write/Include/WorkPath/Get 在 execute() 中被 catch-all 跳过（静默忽略）。
+
+**实现顺序**：
+1. **Write**（最独立）— Normal/Raw 模式，不依赖其他命令
+2. **Read** — 复用 Open 的文件读取逻辑，值输出
+3. **Bash** — bash -c 执行 + 安全审查
+4. **Exec** — script -c 直连终端执行
+
+### 3.1 Bash
 
 **目标**：实现 NCS 的新命令。
 

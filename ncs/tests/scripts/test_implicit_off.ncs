@@ -1,0 +1,3 @@
+!@Open ./tests/data/sample.rs
+!@Location
+pub fn greet(&self) -> String {

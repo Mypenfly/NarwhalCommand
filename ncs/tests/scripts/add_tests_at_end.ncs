@@ -1,0 +1,20 @@
+!@Open ./tests/data/config.rs
+!@New End
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = AppConfig::default();
+        assert_eq!(config.listen_address, "0.0.0.0:3000");
+        assert_eq!(config.db_pool_size, 10);
+    }
+
+    #[test]
+    fn test_from_env_respects_defaults() {
+        let config = AppConfig::from_env();
+        assert_eq!(config.worker_threads, 4);
+    }
+}
+@/Open

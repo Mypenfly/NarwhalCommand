@@ -51,13 +51,15 @@ pub struct CommandEntry {
 
 /// 命令类型
 ///
-/// 由权限类型和执行类型组合而成。
+/// 由权限类型、执行类型和输出类型组合而成。
 #[derive(Debug, Clone)]
 pub struct CommandType {
     /// 权限类型
     pub permission: PermissionType,
-    /// 执行类型
+    /// 执行类型（行/块/仅展开）
     pub execution: ExecutionType,
+    /// 输出类型（流/值），None 表示无输出
+    pub output: Option<OutputType>,
 }
 
 impl CommandType {
@@ -65,12 +67,35 @@ impl CommandType {
         CommandType {
             permission,
             execution,
+            output: None,
         }
     }
 
-    /// 是否为流输出（StreamOutput 或同时具有 StreamOutput 标记）
+    pub fn with_output(
+        permission: PermissionType,
+        execution: ExecutionType,
+        output: OutputType,
+    ) -> Self {
+        CommandType {
+            permission,
+            execution,
+            output: Some(output),
+        }
+    }
+
+    /// 是否为流输出
     pub fn is_stream(&self) -> bool {
-        matches!(self.execution, ExecutionType::StreamOutput)
+        matches!(self.output, Some(OutputType::StreamOutput))
+    }
+
+    /// 是否为值输出
+    pub fn is_value_output(&self) -> bool {
+        matches!(self.output, Some(OutputType::ValueOutput))
+    }
+
+    /// 是否为行执行（不提取内容）
+    pub fn is_line_exec(&self) -> bool {
+        matches!(self.execution, ExecutionType::LineExec)
     }
 
     /// 是否为块执行
@@ -108,13 +133,18 @@ pub enum ExecutionType {
     LineExec,
     /// 块执行：提取从命令下一行到终止条件的内容
     BlockExec,
-    /// 值输出：输出结果不保留，仅打印后丢弃
-    ValueOutput,
-    /// 流输出：输出结果保留在内存中，可供后续命令使用
-    StreamOutput,
     /// 仅展开：遇到时不触发块终止，而是展开为原始字符
     /// （仅用于 Raw 和 Get）
     ExpandOnly,
+}
+
+/// 输出类型 — 决定命令输出的保留方式
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputType {
+    /// 流输出：输出结果保留在内存中，可供后续命令使用
+    StreamOutput,
+    /// 值输出：输出结果不保留，仅打印后丢弃
+    ValueOutput,
 }
 
 /// 模式入口
@@ -224,7 +254,11 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Open".to_string(),
                 exec_path: None,
-                cmd_type: CommandType::new(PermissionType::FileRead, ExecutionType::StreamOutput),
+                cmd_type: CommandType::with_output(
+                    PermissionType::FileRead,
+                    ExecutionType::LineExec,
+                    OutputType::StreamOutput,
+                ),
                 modes: open_modes,
                 subs: vec![
                     ("Location".to_string(), vec!["Normal".to_string()]),
@@ -268,7 +302,11 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Location".to_string(),
                 exec_path: None,
-                cmd_type: CommandType::new(PermissionType::FileRead, ExecutionType::StreamOutput),
+                cmd_type: CommandType::with_output(
+                    PermissionType::FileRead,
+                    ExecutionType::BlockExec,
+                    OutputType::StreamOutput,
+                ),
                 modes: location_modes,
                 subs: vec![
                     ("New".to_string(), vec!["Normal".to_string()]),
@@ -392,9 +430,10 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Bash".to_string(),
                 exec_path: None,
-                cmd_type: CommandType::new(
+                cmd_type: CommandType::with_output(
                     PermissionType::ProgramExec,
-                    ExecutionType::StreamOutput,
+                    ExecutionType::LineExec,
+                    OutputType::StreamOutput,
                 ),
                 modes: bash_modes,
                 subs: vec![],
@@ -417,7 +456,11 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Exec".to_string(),
                 exec_path: None,
-                cmd_type: CommandType::new(PermissionType::ProgramExec, ExecutionType::ValueOutput),
+                cmd_type: CommandType::with_output(
+                    PermissionType::ProgramExec,
+                    ExecutionType::LineExec,
+                    OutputType::ValueOutput,
+                ),
                 modes: exec_modes,
                 subs: vec![],
                 owners: vec![],
@@ -447,7 +490,11 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Read".to_string(),
                 exec_path: None,
-                cmd_type: CommandType::new(PermissionType::FileRead, ExecutionType::ValueOutput),
+                cmd_type: CommandType::with_output(
+                    PermissionType::FileRead,
+                    ExecutionType::LineExec,
+                    OutputType::ValueOutput,
+                ),
                 modes: read_modes,
                 subs: vec![],
                 owners: vec![],
@@ -477,7 +524,11 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Write".to_string(),
                 exec_path: None,
-                cmd_type: CommandType::new(PermissionType::FileWrite, ExecutionType::ValueOutput),
+                cmd_type: CommandType::with_output(
+                    PermissionType::FileWrite,
+                    ExecutionType::BlockExec,
+                    OutputType::ValueOutput,
+                ),
                 modes: write_modes,
                 subs: vec![],
                 owners: vec![],
@@ -706,8 +757,13 @@ mod tests {
 
     #[test]
     fn test_command_type_is_stream() {
-        let t = CommandType::new(PermissionType::FileRead, ExecutionType::StreamOutput);
+        let t = CommandType::with_output(
+            PermissionType::FileRead,
+            ExecutionType::LineExec,
+            OutputType::StreamOutput,
+        );
         assert!(t.is_stream());
+        assert!(t.is_line_exec());
         assert!(!t.is_block_exec());
         assert!(!t.is_expand_only());
     }

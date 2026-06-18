@@ -35,7 +35,6 @@ fn main() {
 
     let script_path = Path::new(&cli.script_path);
 
-    // 校验 .ncs 后缀
     let extension = script_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -48,13 +47,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 校验文件存在
     if !script_path.exists() {
         eprintln!("错误: 脚本文件不存在: {}", cli.script_path);
         std::process::exit(1);
     }
 
-    // 读取并打印脚本内容
     let script_content = match std::fs::read_to_string(&cli.script_path) {
         Ok(content) => content,
         Err(e) => {
@@ -70,11 +67,41 @@ fn main() {
         );
     }
 
+    let registry = ncs::registry::CommandRegistry::init();
+
+    let tokens = match ncs::lexer::Lexer::tokenize(&script_content, &registry) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            eprintln!("词法分析错误: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if cli.verbose {
+        eprintln!("[verbose] 词法分析完成，共 {} 个 Token", tokens.len());
+        for token in &tokens {
+            eprintln!("  {:?}", token);
+        }
+    }
+
+    let commands = match ncs::parser::Parser::parse(tokens, &registry) {
+        Ok(commands) => commands,
+        Err(e) => {
+            eprintln!("语法分析错误: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if cli.verbose {
+        eprintln!("[verbose] 语法分析完成，共 {} 条命令", commands.len());
+        for command in &commands {
+            eprintln!("  {:?}", command);
+        }
+    }
+
     if !cli.quiet {
         println!("加载 .ncs 脚本: {}", cli.script_path);
-        if cli.verbose {
-            println!("{}", script_content);
-        }
+        println!("解析完成: {} 条命令", commands.len());
     }
 }
 

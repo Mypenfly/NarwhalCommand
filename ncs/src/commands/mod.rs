@@ -6,7 +6,9 @@
 //! ## 对应文档
 //!
 //! 详见 ncs_dev.md §5 "命令定义", INSTRUCTION.md §7.6 "命令模块组织"
-//!
-//! ## 实现状态
-//!
-//! Phase 2+ 各命令逐步实现。
+
+pub mod delete;
+pub mod location;
+pub mod new;
+pub mod open;
+pub mod raw;

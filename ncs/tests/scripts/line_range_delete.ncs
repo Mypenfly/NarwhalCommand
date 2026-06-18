@@ -1,0 +1,32 @@
+!@Open ./tests/data/rust_complex.rs
+
+// 场景 1：行号范围 Delete 删除 impl Default for AppConfig（原文件行 22-34）
+!@Location
+!@Delete @22,34
+@/Location
+
+// 场景 2：内容匹配定位 Connection struct，Delete + New 替换字段
+!@Location
+struct Connection {
+    id: u64,
+    created_at: std::time::Instant,
+    last_used: std::time::Instant,
+!@Delete
+    created_at: std::time::Instant,
+    last_used: std::time::Instant,
+!@New
+    created_at: std::time::Instant,
+    last_used: std::time::Instant,
+    pool_size: usize,
+    last_maintenance: std::time::Instant,
+@/Location
+
+// 场景 3：内容匹配定位 ConnectionPool struct
+!@Location
+pub struct ConnectionPool {
+    config: AppConfig,
+    connections: Vec<Connection>,
+    active: usize,
+@/Location
+
+@/Open

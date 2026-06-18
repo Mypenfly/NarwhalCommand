@@ -147,7 +147,7 @@ impl Line {
 }
 
 /// Location 命令中用户提供的定位内容的一行
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct LocationLine {
     /// 从 0 开始的序号（第一行为 0）
     pub index: usize,
@@ -160,7 +160,7 @@ pub struct LocationLine {
 }
 
 /// Location 命令后提取的定位内容
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct LocationContent {
     /// 定位内容的所有行
     pub lines: Vec<LocationLine>,
@@ -237,7 +237,7 @@ pub struct FileContent {
 }
 
 /// New 命令中用户提供的新增内容的一行
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct NewLine {
     /// 相对于插入位置的缩进差异
     pub diff_taps: usize,
@@ -248,14 +248,14 @@ pub struct NewLine {
 }
 
 /// New 命令后提取的新增内容
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct NewContent {
     /// 新增内容的所有行
     pub lines: Vec<NewLine>,
 }
 
 /// Delete 命令中用户提供的删除内容的一行
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct DeleteLine {
     /// 用于匹配的原始文本
     pub content: String,
@@ -264,7 +264,7 @@ pub struct DeleteLine {
 }
 
 /// Delete 命令后提取的匹配内容（到 `...` 分隔符或下一个命令为止）
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct DeleteContent {
     /// 删除匹配内容的所有行
     pub lines: Vec<DeleteLine>,

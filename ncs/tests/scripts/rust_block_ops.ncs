@@ -1,0 +1,34 @@
+!@Open ./tests/data/rust_complex.rs
+
+// 场景 1：Location:Block + Delete:Block 删除 impl Default for AppConfig
+!@Location Block
+impl Default for AppConfig {
+!@Delete Block
+@/Location
+
+// 场景 2：在 AppConfig struct 中添加两个新字段
+!@Location
+pub struct AppConfig {
+    pub name: String,
+    pub version: String,
+    pub features: Vec<String>,
+    pub settings: HashMap<String, String>,
+    pub data_dir: PathBuf,
+    pub max_connections: u32,
+    pub timeout_ms: u64,
+!@New
+    pub log_level: String,
+    pub retry_count: u32,
+@/Location
+
+// 场景 3：在 struct Connection 前添加 derive 属性
+!@Location
+struct Connection {
+    id: u64,
+    created_at: std::time::Instant,
+    last_used: std::time::Instant,
+!@New Start
+#[derive(Debug, Clone)]
+@/Location
+
+@/Open

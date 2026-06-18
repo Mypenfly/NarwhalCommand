@@ -1,0 +1,20 @@
+!@Open ./tests/data/services.rs
+!@Location
+/// Generate a random salt string for password hashing.
+!@Delete
+fn generate_salt(rounds: u32) -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let bytes: Vec<u8> = (0..16).map(|_| rng.gen()).collect();
+    format!("$2b${}${}", rounds, hex::encode(&bytes))
+}
+!@New
+fn generate_salt(rounds: u32) -> Result<String, ServiceError> {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes);
+    let encoded = base64::encode(&bytes);
+    Ok(format!("$2b${}${}", rounds, encoded))
+}
+@/Open

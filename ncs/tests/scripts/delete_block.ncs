@@ -1,0 +1,5 @@
+!@Open ./tests/data/services.rs
+!@Location Block
+fn bcrypt_hash(password: &str, salt: &str) -> Result<String, String> {
+!@Delete Block
+@/Open

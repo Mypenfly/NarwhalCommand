@@ -38,6 +38,24 @@ pub enum NcsError {
     CommandExec(CommandExecError),
 }
 
+impl From<FileError> for NcsError {
+    fn from(err: FileError) -> Self {
+        NcsError::File(err)
+    }
+}
+
+impl From<MatchError> for NcsError {
+    fn from(err: MatchError) -> Self {
+        NcsError::Match(err)
+    }
+}
+
+impl From<EngineError> for NcsError {
+    fn from(err: EngineError) -> Self {
+        NcsError::Engine(err)
+    }
+}
+
 impl NcsError {
     /// 返回错误标题（简短描述）
     pub fn title(&self) -> String {
