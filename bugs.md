@@ -1,6 +1,6 @@
 # NCS Bug 清单与修复记录
 
-> **修复进度**: 第一阶段 5/5 ✅ | 第二阶段 6/6 ✅ | 第三阶段新发现 2 项 | 尚余 11 项
+> **修复进度**: 第一阶段 5/5 ✅ | 第二阶段 6/6 ✅ | 第三阶段 设计中 | 尚余 11 项
 
 ---
 
@@ -166,41 +166,16 @@ fn pop_exec_cmd(&mut self, name: &str) {
 
 ### BUG-204: Location → Delete → New 顺序执行时 Delete 误读到 New 修改后的 Block
 
-**状态**: ⏳ 未修复  
+**状态**: 🟡 设计中（变更追踪模型根本解决）  
 **严重程度**: 严重  
-**对应文档**: ncs_dev.md §5.4（Delete 执行流："在 ContentBlock 内逐行去空白匹配删除内容"）  
-**代码位置**: `ncs/src/commands/delete.rs`、`ncs/src/commands/new.rs`、`ncs/src/engine/mod.rs`
+**对应文档**: ncs_dev.md §5.4（Delete 执行流："在 snapshot_lines 中逐行去空白匹配删除内容"）  
+**代码位置**: `ncs/src/commands/delete.rs`、`ncs/src/commands/new.rs`、`ncs/src/engine/mod.rs`  
 
-**发现场景**: `scenario03_replace_func.ncs` 使用 `!@Location` → `!@Delete` → `!@New` 序列替换函数实现。Location 匹配后创建 ContentBlock，Delete 本应在该 Block 内匹配原始内容并删除，但执行时 Block 中已经包含了 New 插入的内容（`self.items.join(", ")`），导致 Delete 找不到匹配。
+**修复方案**：详见 `docs/superpowers/specs/2026-06-18-phase3-cmdcontent-pipeline-design.md`
 
-**根本原因**: Engine 执行命令时按 AST 顺序遍历（Location → Delete → New），但 `get_search_scope()` 返回的 `ContentBlock` 是共享引用。New 命令的 `execute_normal()` 调用 `build_new_lines()` 修改了 Block，而 Delete 的 `find_delete_match()` 访问到的是已修改的 Block。初步判定为 `execute()` 方法中的命令分发顺序或 Block 引用传递存在缺陷。
+采用**变更追踪模型**：Location 创建 CmdContent 时锁定 `snapshot_lines`，New 和 Delete 不直接修改行，而是向 CmdContent 分别追加 `ContentChange::Insert` 和 `ContentChange::Delete` 记录。Delete 匹配始终使用 `snapshot_lines`（不受 Insert 影响），从根源上消除顺序依赖。所有变更在 Owner 关闭时由 `apply_changes()` 统一生效。
 
-**复现脚本**:
-```ncs
-!@Open ./tests/data/scenarios.rs
-!@Location
-    pub fn deprecated_method(&self) -> String {
-!@Delete
-        let mut result = String::new();
-        for item in &self.items {
-            result.push_str(&format!("[{}]", item));
-        }
-        result
-!@New
-        self.items.join(", ")
-@/Open
-```
-
-**错误信息**:
-```
-Error: Delete 命令未能在当前 Block 中找到匹配内容
-  Block 内容:
-      pub fn deprecated_method(&self) -> String {
-  self.items.join(", ")          ← New 内容已出现在此处
-      }
-```
-
-**临时绕过**: 使用嵌套 Location 分开 Delete 和 New 的作用域，或分别用 `@/Location` 关闭后重新打开新的 Location。
+**依赖**：Phase 3 CmdContent 数据流重构（BUG-101/102/103 同步修复）。
 
 ---
 
@@ -443,7 +418,7 @@ Open 仅注册为 `PermissionType::FileRead`，缺少 FileWrite。
 | §6.3 exec_cmds owner 检查 | ✅ 已修复 | BUG-201 |
 | §6.3 exec_cmds 退出逻辑 | ✅ 已修复 | BUG-202 |
 | §3.2 is_independent 字段 | ❌ 未读取 | BUG-203 |
-| §5.4 Delete 执行顺序 | ❌ New 先修改 Block | BUG-204 |
+| §5.4 Delete 执行顺序（变更追踪） | 🟡 设计中 | BUG-204 |
 | §2.3 @/ 块终止匹配命令名 | ✅ 已修复 | BUG-301 |
 | §6.1 Capture 指令 | ✅ 已修复 | BUG-302 |
 | §5.12 Get 行内展开 | ❌ 仅 strip | BUG-303 |
@@ -469,17 +444,21 @@ Open 仅注册为 `PermissionType::FileRead`，缺少 FileWrite。
 | 第一阶段 | BUG-01/02/04/07/08/12 | main.rs 引擎接入、diff 输出、pop_exec_cmd、NotImplemented 错误 |
 | 第二阶段 | BUG-301/201/202/401/402/302 | @/ 终止、owner 检查、exec_cmds 退出、New 文件级、Delete:Block 校验、Capture |
 
-### 第三阶段（架构修复 — CmdContent 数据流）
+### 第三阶段（设计中 — CmdContent 变更追踪模型）
 
 | Bug | 内容 |
 |-----|------|
-| BUG-204 | Location→Delete→New 执行顺序修复（Delete 读已修改的 Block） |
+| BUG-204 | Location→Delete→New 执行顺序修复（变更追踪模型根本解决） |
 | BUG-101 | CmdContent convert()/out() 模式实现 |
 | BUG-102 | CommandResult 接入命令返回 |
 | BUG-103 | 流/值输出区分接入执行路径 |
 | BUG-104 | pools 完整写入逻辑（从 CommandResult 捕获） |
 | BUG-303 | !@Get 展开从 pools 获取 |
 | BUG-403 | Location 关闭时触发终端输出 |
+| BUG-501 | file_io.rs 补全 |
+
+> 设计方案：`docs/superpowers/specs/2026-06-18-phase3-cmdcontent-pipeline-design.md`  
+> 核心理念：变更追踪模型 — 命令追加 ContentChange 记录，Owner 关闭时 apply_changes() 统一生效
 
 ### 第四阶段（清理）
 

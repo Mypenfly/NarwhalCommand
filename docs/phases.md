@@ -335,26 +335,94 @@ cargo test --test integration_test   # 迁移 n_edit 的测试脚本，适配新
 
 ---
 
-## Phase 3: 新增独立命令（Bash / Exec / Read / Write） ⏳
+## Phase 3: CmdContent 数据流重构（变更追踪模型） ⏳
 
-**目标**：实现 NCS 的新独立命令。
+**目标**：将所有命令的数据流动统一为 CmdContent + ContentChange 变更追踪模型，实现延迟应用、可追踪修改，从根本上解决 BUG-204（New/Delete 执行顺序冲突）。
 
-### 实现路径提示
+### 核心改造
 
-**前置条件**：Phase 2 核心命令已稳定，Engine 分发路由已就绪。
-**当前 Engine 状态**：Bash/Exec/Read/Write/Include/WorkPath/Get 在 execute() 中被 catch-all 跳过（静默忽略）。
+将现有的"命令直接操作 `&mut ContentBlock`"模型替换为：
 
-**实现顺序**：
+```
+命令操作 → 追加 ContentChange 记录 → Owner 关闭时 apply_changes() 统一生效
+```
+
+### 3.0 CmdContent 扩展 + 变更追踪基础
+
+- [ ] `ContentChange` 枚举（Insert / Delete + source_cmd）
+- [ ] `ContentSource` 枚举（Block / File / CommandOutput）
+- [ ] CmdContent 新增字段：`snapshot_lines` / `snapshot_raw` / `changes` / `source_info`
+- [ ] CmdContent 新增方法：`record_insert()` / `record_delete()` / `apply_changes()`
+- [ ] `CommandResult.content` 承载 CmdContent 传递
+- [ ] `Convert() / out() / execute_core()` 三步法在 `Command` 枚举上实现
+- [ ] file_io.rs 补全（BUG-501）
+
+### 3.1 Engine 管道重写
+
+- [ ] `Engine.last_result: Option<CommandResult>` — 追踪上一个命令的输出
+- [ ] `execute()` 重写：统一的三步法管道分发
+- [ ] `apply_content_to_file()` — 将 CmdContent.changes 写到 ContentBlock/FileContent
+- [ ] `handle_close()` 整合变更生效 + Location 终端输出（BUG-403）
+- [ ] Diff 记录从 ContentChange 列表构建
+- [ ] 流输出/值输出接入 `CommandType.output`（BUG-103）
+
+### 3.2 命令方法填充
+
+- [ ] Open: convert/out — FileContent → CmdContent(snapshot=文件行, source=File)
+- [ ] Location: convert/out — 匹配 → ContentBlock → CmdContent(snapshot=匹配行, source=Block)
+- [ ] New: execute_core — `record_insert()` 替代直接行插入（BUG-101/102）
+- [ ] Delete: execute_core — 在 snapshot 匹配 + `record_delete()` 替代直接行删除
+- [ ] 移除 `commands/{new,delete}.rs` 中的直接 ContentBlock 行操作代码
+- [ ] Bash / Read / Write 骨架实现（保留 NotImplemented）
+- [ ] Get 基本展开（从 pools 读取 + 在块提取中展开为原始字符）
+
+### 3.3 Pools & Capture (BUG-104/303)
+
+- [ ] Lexer: `Token::Close { capture: Option<String> }` — 管道语法解析
+- [ ] Parser: `Command::Close { capture: Option<String> }`
+- [ ] Engine: Capture 在 Close 前将 last_result 存入 pools
+- [ ] `!@Get` 实现（pools 读取 + 基本展开）
+
+### 3.4 Location 终端输出 (BUG-403)
+
+- [ ] `engine.print_location_result()` — @/Location 时输出带行号的匹配块（灰色）
+- [ ] `--verbose` 标志 CLI 暴露
+
+### 参考文档
+
+| 内容 | 文档位置 |
+|------|----------|
+| 变更追踪模型 | ncs_dev.md §3.3 |
+| New 执行流（新） | ncs_dev.md §5.3 |
+| Delete 执行流（新） | ncs_dev.md §5.4 |
+| 数据传递路径（新） | ncs_dev.md §6.4, §6.5 |
+| 详细设计 | `docs/superpowers/specs/2026-06-18-phase3-cmdcontent-pipeline-design.md` |
+
+### 验证
+
+```bash
+cargo test -p ncs -- engine
+cargo test -p ncs -- commands
+cargo test --test integration_test   # 全量回归 + BUG-204 严格断言
+cargo clippy --workspace -- -D warnings
+cargo fmt --check
+```
+
+---
+
+## Phase 4: 新增独立命令（Bash / Exec / Read / Write / Include / WorkPath） ⏳
+
+**目标**：实现 NCS 的新独立命令，在 CmdContent 管道就绪后接入。
+
+### 实现顺序：
 1. **Write**（最独立）— Normal/Raw 模式，不依赖其他命令
 2. **Read** — 复用 Open 的文件读取逻辑，值输出
 3. **Bash** — bash -c 执行 + 安全审查
 4. **Exec** — script -c 直连终端执行
+5. **Include** — 命令注册表动态扩展
+6. **WorkPath** — 工作路径管理
 
-### 3.1 Bash
-
-**目标**：实现 NCS 的新命令。
-
-### 3.1 Bash
+### 4.1 Bash
 
 - [ ] 行执行：提取命令字符串
 - [ ] 通过 `bash -c` 执行
@@ -362,38 +430,45 @@ cargo test --test integration_test   # 迁移 n_edit 的测试脚本，适配新
 - [ ] 终端打印结果
 - [ ] 安全审查：拦截 `sudo`、`rm -rf /`、`chmod 777 /` 等高危命令
 
-### 3.2 Exec
+### 4.2 Exec
 
 - [ ] 行执行：提取命令字符串
 - [ ] 通过 `script -c` 执行（直连终端，支持彩色/流式/交互式）
 - [ ] 值输出：仅打印，结果不保留
 
-### 3.3 Read
+### 4.3 Read
 
 - [ ] 模式和参数与 `!@Open` 完全一致
 - [ ] 值输出：结果不保留
 - [ ] 输出带高亮和行号的文件内容
 - [ ] 输出带高亮和树状结构的路径
 
-### 3.4 Write
+### 4.4 Write
 
-- [ ] `Normal` 模式：
-  - 检查路径类型 + 创建父目录
-  - 块内容写入文件
-  - 内容中的 `!@Raw` 展开为原始字符
-- [ ] `Raw` 模式：
-  - 从下一行到 EOF 的全部内容原样收集
-  - 不解析任何命令标记
-  - 写入后程序直接退出
+- [ ] `Normal` 模式：块内容写入文件
+- [ ] `Raw` 模式：从下一行到 EOF 的全部内容原样收集，写入后程序退出
+
+### 4.5 Include
+
+- [ ] 解析 Include 参数（alias, block, type, exec, owners, subs）
+- [ ] 校验 alias 不与内置命令重名
+- [ ] 将外部命令注册到 CommandRegistry
+
+### 4.6 WorkPath
+
+- [ ] 验证路径存在
+- [ ] 更改工作路径
 
 ### 文档参考
 
 | 内容 | 文档位置 |
 |------|----------|
-| Bash 命令 | ncs_dev.md §5.6 |
-| Exec 命令 | ncs_dev.md §5.7 |
-| Read 命令 | ncs_dev.md §5.8 |
-| Write 命令 | ncs_dev.md §5.9 |
+| Bash | ncs_dev.md §5.6 |
+| Exec | ncs_dev.md §5.7 |
+| Read | ncs_dev.md §5.8 |
+| Write | ncs_dev.md §5.9 |
+| Include | ncs_dev.md §5.10 |
+| WorkPath | ncs_dev.md §5.11 |
 
 ### 验证
 
@@ -402,43 +477,6 @@ cargo test commands::bash
 cargo test commands::exec
 cargo test commands::read
 cargo test commands::write
-```
-
----
-
-## Phase 4: Include + WorkPath — 命令注册表扩展
-
-**目标**：实现外部命令导入和工作路径管理。
-
-### 4.1 Include
-
-- [ ] 解析 Include 命令的参数（alias, block, type, exec, owners, subs）
-- [ ] 校验 alias 不与任何内置命令重名（重名 → AliasConflict 错误）
-- [ ] owners 自动填充 `include(cmd)` 默认值
-- [ ] 将导入的命令注册到 CommandRegistry
-- [ ] 外部命令调用：
-  - 行执行：展开为路径，按指定 exec 方式执行
-  - 块执行：提取块内容作为最后一个参数（字符串）
-  - 流输出：建立执行结果保存
-
-### 4.2 WorkPath
-
-- [ ] 验证路径存在
-- [ ] 文件路径 → 取其父目录
-- [ ] 更改工作路径（影响后续 `./` `../` 展开和外部命令路径）
-- [ ] 默认值：脚本未遇 `!@WorkPath` 时，工作路径 = 脚本父目录
-
-### 文档参考
-
-| 内容 | 文档位置 |
-|------|----------|
-| Include 命令 | ncs_dev.md §5.10 |
-| WorkPath 命令 | ncs_dev.md §5.11 |
-| CommandRegistry | ncs_dev.md §3.1 |
-
-### 验证
-
-```bash
 cargo test commands::include
 cargo test commands::work_path
 cargo test registry
@@ -446,39 +484,27 @@ cargo test registry
 
 ---
 
-## Phase 5: 数据传递系统（Capture / Get / pools）
+## Phase 5: Get 高级特性 + like 伪装
 
-**目标**：实现命令间的数据捕获和复用。
+**目标**：实现 Get 的 like 伪装模式和高级数据传递。
 
-### 5.1 Capture 指令
+### 5.1 Get like 模式
 
-- [ ] 解析 `@/Cmd | Capture pool_name` 语法
-- [ ] 命令退出 `exec_cmds` 前，将其 `CmdContent` 复制到 `pools`
-- [ ] 键名冲突处理：若 `pool_name` 已在 `pools` 中存在，覆盖（打印警告）
+- [ ] 指定 `like` 选项：在 `exec_cmds` 中写入伪装的命令条目
+- [ ] 后续命令可在 `exec_cmds` 中找到 owner
+- [ ] 遇到对应的 `@/Cmd` 时执行正常关闭逻辑
+- [ ] 支持 `{}` 占位符替换
 
-### 5.2 Get 命令
+### 5.2 CmdContent 完善
 
-- [ ] 从 `pools` 中提取 `pool_name` 对应的 `CmdContent`
-- [ ] 指定 `like` 选项：
-  - 在 `exec_cmds` 中写入伪装的命令条目
-  - 后续命令可在 `exec_cmds` 中找到 owner
-  - 遇到对应的 `@/Cmd` 时执行正常关闭逻辑
-- [ ] 不指定 `like`：
-  - 展开 `raw_content` 作为纯文本
-  - Get 本身不记录到 `exec_cmds`
-  - 支持 `{}` 占位符替换
-
-### 5.3 CmdContent 完善
-
-- [ ] 确保所有内置命令实现 `convert()` / `out()` 方法
 - [ ] `send()` 方法：序列化为最原始字符串（外部命令调用用）
 - [ ] `print()` 方法：输出 `result` 字段内容到终端
+- [ ] pools 键名冲突处理
 
 ### 文档参考
 
 | 内容 | 文档位置 |
 |------|----------|
-| Capture 指令 | ncs_dev.md §6.1 |
 | Get 命令 | ncs_dev.md §5.12 |
 | 数据传递路径 | ncs_dev.md §6.4 |
 | CmdContent | ncs_dev.md §3.3 |
@@ -542,21 +568,24 @@ cargo fmt --check
 
 ```
 Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ──▶ Phase 4 ──▶ Phase 5
-                                    │             │             │
-                                    │             │             │
-                                    └─────────────┴─────────────┘
-                                                  │
-                                                  ▼
+                                     │             │             │
+                                     │  (CmdContent  (独立命令)    (Get高级)
+                                     │   管道重构)                  │
+                                     │                           │
+                                     └───────────┬───────────────┘
+                                                 │
+                                                 ▼
                                             Phase 6
-                                           (可与 3/4/5 并行)
+                                           (错误+输出打磨,
+                                            可与 4/5 并行)
 ```
 
 - **Phase 0 → Phase 1**：骨架是词法/语法分析的基础
 - **Phase 1 → Phase 2**：Parser 出 AST 后，Engine 才能执行
-- **Phase 2 → Phase 3**：核心命令稳定后，再添加新命令
-- **Phase 3 ↔ Phase 4**：可并行开发
-- **Phase 2/3/4 → Phase 5**：命令齐全后才能测试数据传递
-- **Phase 6**：可与 Phase 3/4/5 并行，持续打磨
+- **Phase 2 → Phase 3**：核心命令稳定后，进行 CmdContent 数据流重构
+- **Phase 3 → Phase 4**：CmdContent 管道就绪后，新独立命令接入
+- **Phase 4 → Phase 5**：命令齐全后实现 Get 高级特性
+- **Phase 6**：可与 Phase 4/5 并行，持续打磨
 
 ---
 

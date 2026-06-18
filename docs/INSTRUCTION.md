@@ -58,15 +58,17 @@
                         │  block_stack: Vec<ContentBlock>              │
                         │  exec_cmds: Vec<ExecutedCommand>             │
                         │  pools: HashMap<String, CmdContent>          │
+                        │  last_result: Option<CommandResult>          │
+                        │       (当前 CmdContent 管道，含变更记录)      │
                         └──────────────────────────────────────────────┘
 
-   Open ──▶ Location ──▶ [Location]* ──▶ New ──▶ Delete ──▶ @/Open
+   Open ──► Location ──► [Location]* ──► New ──► Delete ──► @/Open
               │              │
-              │              └──▶ [Raw]  (仅展开，融入父命令内容)
+              │              └──► [Raw]  (仅展开，融入父命令内容)
               │
-              └──▶ Bash / Exec / Read / Include / Get  (独立命令)
+              └──► Bash / Exec / Read / Include / Get  (独立命令)
                            │
-                           └──▶ WorkPath  (无类型元命令)
+                           └──► WorkPath  (无类型元命令)
 ```
 
 **状态约束**：
@@ -75,6 +77,7 @@
 - `Delete(Block)` 要求前一个 `Location` 使用了 Block 模式
 - `@/Cmd` 按从后向前的顺序清除 `exec_cmds` 中的非独立命令
 - 脚本末尾未显式关闭的命令自动执行隐式关闭
+- **CmdContent 变更追踪**：命令不直接修改文件行，向 CmdContent 追加 ContentChange 记录，变更在 Owner 关闭时统一生效
 
 ---
 
@@ -133,24 +136,57 @@ struct ExecutedCommand {
 }
 ```
 
-### 2.3 CmdContent — 命令间数据传递
+### 2.3 CmdContent — 命令间数据传递 + 变更追踪
 
 ```rust
-/// 命令间传递的统一数据结构
-/// 所有内置命令必须实现 convert() 和 out() 方法，
-/// 其输入和输出格式完全一致（都是 CmdContent）
+/// 命令间传递的统一数据结构 + 变更追踪
+///
+/// 核心模型：命令不直接修改文件行，而是追加 ContentChange 记录。
+/// 变更在 Owner 命令退出时由 apply_changes() 统一生效。
 struct CmdContent {
     raw_content: String,
     lines: Vec<CmdLine>,
     is_print: bool,
     result: Vec<CmdLine>,
+
+    // === 变更追踪字段 ===
+    /// Location 创建时的原始快照（Delete 匹配目标，不随 Insert 改变）
+    snapshot_lines: Vec<CmdLine>,
+    snapshot_raw: String,
+    /// 变更记录列表（按命令执行顺序追加）
+    changes: Vec<ContentChange>,
+    /// 数据来源（Block / File / CommandOutput），决定变更写回目标
+    source_info: Option<ContentSource>,
 }
 
-struct CmdLine {
-    line_num: usize,
-    content: String,
+struct CmdLine { line_num: usize, content: String }
+
+/// 内容变更记录
+enum ContentChange {
+    Insert {
+        after_line: usize,      // snapshot 中的插入位置
+        lines: Vec<CmdLine>,
+        source_cmd: String,     // "NEW"
+    },
+    Delete {
+        start_line: usize,      // snapshot 中的删除起始
+        end_line: usize,        // snapshot 中的删除结束
+        source_cmd: String,     // "DELETE"
+    },
+}
+
+enum ContentSource {
+    Block { block_index: usize },
+    File { file_path: String },
+    CommandOutput,
 }
 ```
+
+**关键设计要点**：
+- `snapshot_lines` 是 Location 创建时的原始数据，**从不被修改**。Delete 始终在 snapshot 上匹配
+- `changes` 是追加列表，每个命令通过 `record_insert()` / `record_delete()` 追加
+- `lines` 是惰性字段，在 `apply_changes()` 时从 snapshot + changes 计算
+- 同一作用域内的命令共享同一个 CmdContent，串行查看/追加变更
 
 ### 2.4 命令 AST（Parser 输出）
 
@@ -280,30 +316,36 @@ struct DeleteLine {
    跳过空行和注释行，taps <= base_taps 时结束
 ```
 
-### 3.3 New 插入算法
+### 3.3 New 插入算法（变更追踪）
 
-> 详见 n_edit_dev.md 的 New 章节，核心逻辑完全保留。
-
-```
-1. 确定插入位置:
-   - Normal: 在 Location 最后匹配行之后 (块内偏移 = matched_line_count)
-   - Start:  block 开头 (索引 0)
-   - End:    block 末尾 (索引 = block.lines.len())
-2. 以插入位置的 taps 为基准，加上各 NewLine 的 diff_taps → 最终缩进
-3. is_raw 行保留原始内容，不计算缩进
-4. 插入后 reindex() 重新分配行号和 diff_taps，重建 first_line_index
-```
-
-### 3.4 Delete 操作算法
-
-> 详见 n_edit_dev.md 的 Delete 章节，核心逻辑完全保留。
+> 详见 ncs_dev.md §5.3。
 
 ```
-1. 在 ContentBlock 内逐行去空白匹配 DeleteContent
-2. 要求连续匹配，不可跳行
-3. Delete 首行必须紧邻 Location 最后一行（中间不能有非空行），否则 DeleteNotAdjacent
-4. 删除匹配区间 → reindex()
-5. Delete:Block → 删除整个 ContentBlock，仅保留首行行号
+1. 检查 exec_cmds 中有所属命令（Location），否则报错
+2. 接收上一个命令的 CmdContent（含 snapshot_lines 和已有变更）
+3. 将 NewContent 行转换为 Vec<CmdLine>（含 diff_taps 缩进计算）
+4. 确定插入位置：
+   - Normal: 在 Location 匹配位置之后（match_info.matched_line_count）
+   - Start:  block 开头（索引 0）
+   - End:    block 末尾（snapshot_lines.len()）
+5. is_raw 行保留原始内容，不计算缩进
+6. 调用 content.record_insert(position, new_lines, "NEW") 追加 ContentChange::Insert
+7. 不立即修改 ContentBlock — 变更在 Location 关闭时由 apply_changes() 统一生效
+```
+
+### 3.4 Delete 操作算法（变更追踪 + 快照匹配）
+
+> 详见 ncs_dev.md §5.4。
+
+```
+1. 检查 exec_cmds 中有 Location，否则报错
+2. 接收上一个命令的 CmdContent（含 snapshot_lines）
+3. 在 snapshot_lines（Location 原始快照）中逐行去空白匹配 DeleteContent
+   - 注意：使用 snapshot_lines 而非 lines，确保不受已有 Insert 变更影响
+4. 要求连续匹配，不可跳行；首行必须紧邻 Location 最后一行（邻接检查）
+5. 匹配成功后调用 content.record_delete(start_idx, end_idx, "DELETE") 追加 ContentChange::Delete
+6. Delete:Block → 追加 Delete 变更覆盖整个 snapshot_lines 范围
+7. 不立即修改 ContentBlock — 变更在 Location 关闭时统一生效
 ```
 
 ### 3.5 块执行内容提取

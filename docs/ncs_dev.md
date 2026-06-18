@@ -232,22 +232,23 @@ struct ExecutedCommand {
 - 将从这个 Cmd 开始到列表末尾的、非独立命令的所有条目全部移除
 - 独立命令在它的 `@/Cmd` 关闭时一并清除
 
-### 3.3 命令间数据传递 — CmdContent
+### 3.3 命令间数据传递 — CmdContent + 变更追踪
 
-所有内置命令的数据结构中必须留有 `raw_content` 字段。两个命令之间的数据传递，其数据格式始终是一致的。
+**核心理念**：所有命令（除仅展开命令）之间的数据流动统一为 `CmdContent`。命令不直接修改文件行，而是向 CmdContent 追加**变更记录（ContentChange）**。变更在 Owner 命令退出时由 CmdContent 统一生效。这一模型实现了修改可追踪、可撤回，并从根源上解决了修改顺序依赖问题。
 
 ```rust
-/// 命令间传递的统一数据结构
+/// 命令间传递的统一数据结构 + 变更追踪
 ///
 /// 所有内置命令：
 /// 1. 必须实现 convert(cmd_content: CmdContent) → 内部数据结构
 /// 2. 必须实现 out(内部数据) → CmdContent
 /// 3. convert 的输入格式与 out 的输出格式完全一致
+/// 4. 数据修改通过追加 ContentChange 记录实现，而非直接操作行
 struct CmdContent {
     /// 原始文本（供命令解析）
     raw_content: String,
 
-    /// 按行解析的通用数据
+    /// 按行解析的通用数据（变更已应用的当前状态，惰性计算）
     lines: Vec<CmdLine>,
 
     /// 打印权限，由前一个命令的类型决定
@@ -255,18 +256,72 @@ struct CmdContent {
 
     /// 打印内容（可包含颜色等格式信息）
     result: Vec<CmdLine>,
+
+    // === 变更追踪字段 ===
+    /// Location 创建时的原始数据快照（不可变，仅追加不会修改）
+    /// Delete 命令匹配始终使用此快照，不受其他命令变更影响
+    snapshot_lines: Vec<CmdLine>,
+    snapshot_raw: String,
+
+    /// 变更记录列表（按命令执行顺序追加）
+    /// 每个命令通过 record_insert / record_delete 方法追加
+    changes: Vec<ContentChange>,
+
+    /// 数据来源信息（决定变更写回目标：ContentBlock / FileContent / 命令输出）
+    source_info: Option<ContentSource>,
 }
 
 /// 通用的行数据结构
 struct CmdLine {
     /// 行号，对应于最初内容的格式
-    /// （如果是 Open 得到的，则对应于文件中的行号）
     line_num: usize,
     /// 行内容
     content: String,
 }
 
+/// 内容变更记录 — 命令对 CmdContent 的修改追踪
+enum ContentChange {
+    /// 插入变更（来自 New / Get）
+    Insert {
+        /// 在 snapshot 中的插入位置（行索引，插入到该行之后）
+        after_line: usize,
+        /// 插入的行内容
+        lines: Vec<CmdLine>,
+        /// 变更来源命令（"NEW"）
+        source_cmd: String,
+    },
+    /// 删除变更（来自 Delete）
+    Delete {
+        /// 在 snapshot 中的删除起始行索引
+        start_line: usize,
+        /// 在 snapshot 中的删除结束行索引（含）
+        end_line: usize,
+        /// 变更来源命令（"DELETE"）
+        source_cmd: String,
+    },
+}
+
+/// CmdContent 的数据来源（决定 write_back 目标）
+enum ContentSource {
+    /// 来源为 ContentBlock（Location 匹配产生）
+    Block { block_index: usize },
+    /// 来源为整个文件（Open 产生）
+    File { file_path: String },
+    /// 来源为命令输出（Bash / Get 产生）
+    CommandOutput,
+}
+
 impl CmdContent {
+    /// 记录一个 Insert 变更
+    fn record_insert(&mut self, after_line: usize, lines: Vec<CmdLine>, source_cmd: &str);
+
+    /// 记录一个 Delete 变更
+    fn record_delete(&mut self, start_line: usize, end_line: usize, source_cmd: &str);
+
+    /// 将所有变更应用到 snapshot，生成最终 lines
+    /// 在 Owner 命令退出时调用
+    fn apply_changes(&mut self);
+
     /// 序列化为最原始的字符串，用于作为外部命令调用的最后一个参数
     fn send(&self) -> String;
 
@@ -275,8 +330,6 @@ impl CmdContent {
 }
 
 /// 命令执行结果
-///
-/// 每个命令执行完毕后返回此结构。
 struct CommandResult {
     /// 输出的 CmdContent（供从属命令使用）
     content: CmdContent,
@@ -285,14 +338,31 @@ struct CommandResult {
 }
 ```
 
-**数据流动示例 — New 命令**：
+**数据流动模型**：
 
-1. 上一个命令（通常是 Location）执行 `out()` → 得到 `CmdContent`
-2. New 命令执行 `convert(CmdContent)` → 得到内部数据结构（如 ContentBlock）
-3. New 执行插入逻辑 → 修改内部数据结构
-4. New 执行 `out()` → 得到新的 `CmdContent`
-5. `exec_cmds` 中加入 `("New", "Normal")`
-6. 下一个命令若 owner 包含 `("New", "Normal")`，则可接收此 `CmdContent`
+脚本从上往下逐行执行，后一个命令始终从前一个命令得到 CmdContent。块内（`!@Cmd ... @/Cmd` 之间）共享同一个 CmdContent，命令串行查看/追加变更。
+
+```
+Location ──out()──► CmdContent(snapshot=匹配行, source=Block)
+                         │
+              ┌──────────┘ (同一个 CmdContent 按顺序流转)
+              ▼
+New ──convert()──► 查看 snapshot, 追加 ContentChange::Insert ──out()──► CmdContent
+                         │
+              ┌──────────┘
+              ▼
+Delete ──convert()──► 在 snapshot 中匹配, 追加 ContentChange::Delete ──out()──► CmdContent
+                         │
+              ┌──────────┘
+              ▼
+@/Location ──► CmdContent.apply_changes() ──► 写入 ContentBlock.lines → write_back
+```
+
+**关键规则**：
+1. 命令从**前一条流输出命令**获取输入 CmdContent
+2. Delete 匹配始终使用 `snapshot_lines`，因此不受 New（Insert）执行顺序的影响
+3. 变更在 Owner 退出时统一生效（延迟应用），而非每个命令立即修改文件
+4. 修改可追踪：`changes` 列表记录每次变更的来源命令和时间顺序
 
 ### 3.4 全局数据池（pools）
 
@@ -423,6 +493,8 @@ enum Command {
     },
     Close {
         name: String,
+        /// Capture 管道: @/Open | Capture pool_name
+        capture: Option<String>,
     },
 }
 
@@ -536,16 +608,16 @@ enum WriteMode { Normal, Raw }
 | `Start` | 在文件/Block 开头插入 |
 | `End` | 在文件/Block 末尾插入 |
 
-**执行流**（与 n_edit 逻辑一致）:
-1. 检查 `exec_cmds` 中是否有所属命令，若无则报错
-2. 接收上一个命令 `out()` 得到的 `CmdContent`
-3. `convert()` 为内部数据结构
-4. 按模式在指定位置插入内容
-5. 内容每行的 diff_taps 作为绝对缩进量，以插入位置 taps 为基准计算最终缩进
+**执行流**（变更追踪模型）:
+1. 检查 `exec_cmds` 中是否有所属命令（Location），若无则报错
+2. 接收上一个命令的 `CmdContent`（通常来自 Location，已包含 snapshot_lines）
+3. `convert()` 提取 NewContent，将插入行转换为 `Vec<CmdLine>`（含 diff_taps 缩进计算）
+4. 在 `CmdContent.snapshot_lines` 上计算插入位置（基于 match_info: Location 匹配位置 / DeleteAt 位置 / 末尾）
+5. 调用 `content.record_insert(position, new_lines, "NEW")` 追加 `ContentChange::Insert`
 6. `is_raw` 行保留原始格式不计算缩进
-7. 修改完成后 `reindex()` 重排行号
-8. `out()` 得到新的 `CmdContent`
-9. **同步修改** `LocationResult`：新增行前加 `+`，内容标绿色
+7. `out()` 返回 CmdContent（现在包含新增的 Insert 变更记录）
+8. 不立即修改 ContentBlock — 变更在 Location 关闭时统一生效
+9. **同步修改** `LocationResult`：新增行前加 `+`，内容标绿色（在变更生效时处理）
 
 > **约束**：`!@New Normal` 之前最近的一个命令不能是 `@/more`（已移除）或任何会切断 Location 状态的 Token。前一个 Location 必须仍在 `exec_cmds` 中。
 
@@ -569,14 +641,17 @@ enum WriteMode { Normal, Raw }
 | `Normal` | 在 ContentBlock 内匹配并删除连续行 |
 | `Block` | 删除整个 ContentBlock（要求 Location 也使用 Block 模式） |
 
-**执行流**（与 n_edit 逻辑一致）:
+**执行流**（变更追踪模型）:
 1. 检查 `exec_cmds` 中是否有 Location
-2. 接收上一个 Location 命令 `out()` 得到的 `CmdContent`
-3. 在 ContentBlock 内逐行去空白匹配删除内容
+2. 接收上一个命令的 `CmdContent`（包含 snapshot_lines 和已有变更记录）
+3. 在 **`CmdContent.snapshot_lines`**（Location 创建时的原始快照）中逐行去空白匹配删除内容
 4. 要求连续匹配，不可跳行
-5. 删除要求紧邻 Location 最后一行
-6. 删除后 `reindex()` 重排行号
-7. **同步修改** `LocationResult`：删除行前加 `-`，内容标红色
+5. 首行必须紧邻 Location 最后一行（邻接检查）
+6. 匹配成功后调用 `content.record_delete(start_idx, end_idx, "DELETE")` 追加 `ContentChange::Delete`
+7. 不立即修改 ContentBlock — 变更在 Location 关闭时统一生效
+8. **同步修改** `LocationResult`：删除行前加 `-`，内容标红色（在变更生效时处理）
+
+> **关键设计**：Delete 始终在 `snapshot_lines` 上匹配，不受其他命令（如 New）追加的 Insert 变更影响。这从根源上解决了 Location → New → Delete 执行顺序下的匹配失败问题。无论 New 和 Delete 的执行顺序如何，Delete 的匹配目标（snapshot）不变。
 
 ---
 
@@ -811,19 +886,58 @@ enum WriteMode { Normal, Raw }
 ### 6.4 数据传递路径总结
 
 ```
-Open(Dir) ──out()──► CmdContent ──convert()──► Location(Normal) ──out()──► CmdContent
-                                                                              │
-                    ┌─────────────────────────────────────────────────────────┘
-                    ▼
-              CmdContent ──convert()──► New(Normal) ──out()──► CmdContent
-                    │                                              │
-                    │     ┌────────────────────────────────────────┘
-                    │     ▼
-                    │   CmdContent ──convert()──► Delete(Normal)
-                    │
-                    ▼
-              Capture → pools["result"] ──Get──► CmdContent ──► 后续命令
+                             ┌── snapshot_lines（Location 创建的原始快照，Delete 匹配目标）
+                             │
+Open ──out()──► CmdContent ──convert()──► Location ──out()──► CmdContent(snapshot + source)
+                                        (BlockExec)               │
+                                                    ┌─────────────┘
+                                                    │  同一个 CmdContent 串行流转
+                                                    ▼
+                              New ──convert()──► record_insert() ──out()──► CmdContent(+Insert)
+                                                    │
+                              Delete ──convert()──► snapshot 匹配 ──record_delete() ──out()──► CmdContent(+Delete)
+                                                    │
+                                                    ▼
+                              @/Location ──► apply_changes() ──► ContentBlock.lines ──► write_back
+                                                    │
+                                                    ▼
+                              Capture → pools["result"] ──Get──► CmdContent ──► 后续命令
+
+关键点：
+- New/Delete 不直接修改文件行，只追加 ContentChange 记录
+- Delete 始终在 snapshot_lines（原始快照）上匹配，不受 Insert 变更影响
+- 变更在 Owner 关闭时由 apply_changes() 统一生效
+- changes 列表记录每次变更的来源命令，支持追踪和撤销
 ```
+
+### 6.5 变更生效流程
+
+变更在 Owner 命令退出时（`@/Cmd`）由 Engine 触发生效：
+
+1. Engine 从 `last_result` 中获取当前 CmdContent
+2. 调用 `content.apply_changes()` → 将 Insert/Delete 应用到 snapshot_lines 得到最终 lines
+3. 根据 `content.source_info` 确定写回目标：
+   - `ContentSource::Block { block_index }` → 写入 `block_stack[block_index]`，调用 `block.reindex()`
+   - `ContentSource::File { file_path }` → 写入 `engine.file`，调用 `file.reindex()`
+4. 记录 diff_lines（从 ContentChange 列表构建 Added/Deleted 行）
+5. 执行 block_stack pop / file write_back
+6. 若有关联的 Capture 指令 → CmdContent（含 changes 历史）存入 pools
+
+**变更应用算法**（`apply_changes()`）：
+
+```
+输入 changes: Vec<ContentChange>, snapshot_lines: Vec<CmdLine>
+输出 lines: Vec<CmdLine>
+
+1. result = snapshot_lines.clone()
+2. 按 changes 顺序依次应用：
+   - Insert { after_line, lines }: splice 插入到 result[after_line+1] 处
+   - Delete { start_line, end_line }: drain result[start_line..=end_line]
+3. raw_content = join(result.lines.content, "\n")
+4. 返回最终 lines
+```
+
+所有变更基于 snapshot 的位置索引，应用顺序不影响最终结果（Insert 插入到 snapshot 中的固定位置，Delete 删除 snapshot 中的固定行）。
 
 ---
 
