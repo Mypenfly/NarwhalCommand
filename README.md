@@ -1,194 +1,127 @@
-# N_Edit
+# NarwhalCommand
 
-**基于语义级命令的精确代码编辑工具。** 通过 `.ned` 脚本实现格式感知、缩进安全的源码修改。
+**实验性命令脚本系统。** 将 `"系统一切皆是文本"` 推向极致——用统一的字符级语义语法操控整个系统，从文件编辑到 Shell 命令，从数据管道到外部工具。
 
-## 为什么选择 N_Edit
+> **实验性声明**: 本项目是一个激进的系统交互范式实验。语法设计、命令模型、数据流动方式均为探索性质，随时可能发生破坏性变更。被实验者是：一个 LLM 能否通过归一化的文本命令语法，以最低学习成本操控任意系统资源？
 
-传统搜索替换对代码格式敏感，一行缩进差异就匹配不到。`.ned` 脚本用 **去空白内容 + 缩进差异** 双重匹配，让 LLM 和人类都能**一次写对、精准修改**。
+## 核心理念
 
 ```
-搜索替换:  "    fn main() {" → 缩进差一格就失败
-N_Edit:    //!@Location: \n fn main() { → 去空白匹配，忽略缩进差异
+传统:  Shell脚本 + sed/awk + Python胶水 + Makefile = 碎片化工具链
+NCS:   !@Open → !@Location → !@Delete → !@New → @/Open = 统一语义流
 ```
 
-## 核心能力
+**一条语法，所有操作。** 不是取代 Bash，而是把 Bash、编辑器、包管理器、部署工具全部纳入同一个语义化命令框架中——脚本即是文档，文档即是执行。
 
-| 特性 | 实现 |
-|------|------|
-| **语义匹配** | Location 命令通过 stripped_content + diff_taps 精确找到目标 |
-| **Block 解析** | Location:Block / Delete:Block 识别花括号和缩进语言的完整代码块 |
-| **格式保留** | 插入内容保持缩进层级，不做额外格式化 |
-| **安全写入** | 全在内存中修改，失败时原文件零影响 |
-| **详细报错** | 匹配歧义时给出候选列表，帮助快速调整 |
-| **管道友好** | 彩色输出自动检测终端能力，重定向时关闭颜色 |
+## 仓库结构
 
-## 快速开始
+```
+NarwhalCommand/
+├── n_edit/          # 精确代码编辑引擎（稳定）
+│   └── src/         # 基于 //!@ 注解的语义级文件修改工具
+├── ncs/             # Narwhal Command Script（开发中）
+│   └── src/         # 通用命令脚本系统（!@Cmd 语法）
+└── docs/            # 设计文档和开发指南
+```
+
+### n_edit — 现有稳定工具
+
+精确代码编辑。使用 `//!@` 前缀的 `.ned` 脚本，通过**去空白内容 + 缩进差异**双重匹配实现格式感知的源码修改。297 个测试，全部通过。
 
 ```bash
-cargo build --release
-./target/release/n_edit script.ned           # 执行 .ned 脚本
-./target/release/n_edit script.ned --verbose  # 显示执行详情
-./target/release/n_edit script.ned --quiet    # 只输出错误
+cargo run -p n_edit -- script.ned
 ```
 
-## .ned 脚本示例
+### ncs — 下一代命令系统（Phase 1 进行中）
 
-### 基本替换
+从 n_edit 的单一文件编辑扩展为**全系统可操作的命令脚本**。关键变化：
 
-```ned
-//!@Open: src/main.rs
-//!@Location:
-fn main() {
-//!@Delete:
-    old_code();
-...
-//!@New:
-    new_code();
-...
-//!@Off:Open
+| 方面 | n_edit | ncs |
+|------|--------|-----|
+| 命令前缀 | `//!@Cmd:` | `!@Cmd` |
+| 关闭符号 | `//!@Off:Cmd` | `@/Cmd` |
+| 执行模型 | 单文件状态机 | 命令注册表 + exec_cmds + pools |
+| 数据传递 | 隐式栈 | 显式 CmdContent convert/out |
+| 扩展能力 | 无 | Include 动态注册外部命令 |
+
+```bash
+cargo run -p ncs -- script.ncs
 ```
 
-### 嵌套定位（精确操作深层代码）
+## 设计哲学
 
-```ned
-//!@Open: src/handler.rs
-//!@Location:
-impl RequestProcessor {
-//!@Location:
-    fn handle_active(&self) {
-//!@Location:
-        match self.state {
-            State::Running => {
-//!@Delete:
-                self.old_logic();
-...
-//!@New:
-                self.new_pipeline();
-...
-//!@Off:Location
-//!@Off:Location
-//!@Off:Location
-//!@Off:Open
-```
+### 字符级精度
+一切操作基于字符——不依赖 AST、不用正则魔法、不信任自动格式化。你要什么，就写什么。
 
-### 在类中新增方法（Python）
+### 语义即命令
+`!@Open` 读文件，`!@Location` 定位，`!@Delete` 删除，`!@New` 写入。命令名就是英语单词，语法就是自然语言的排列组合。
 
-```ned
-//!@Open: app.py
-//!@Location:
-    def complete_task(self, task_id: str) -> bool:
-//!@New:
-    def reopen_task(self, task_id: str) -> bool:
-        task = self._tasks.get(task_id)
-        if task is None:
-            return False
-        task.completed = False
-        return True
+### 管道即数据
+命令间通过 `CmdContent` 传递数据。`Capture` 存入全局池，`Get` 取出复用。shell 管道传字节，NCS 管道传结构化内容。
 
-//!@Off:Open
-```
+### 错误即指南
+每个错误附带 `title`（标题）、`detail`（详情）、`hints`（修复建议）。不是报错，是指路。
 
-### 按行号精确定位
+## 命令概览（ncs）
 
-```ned
-//!@Open: src/main.rs
-//!@Location:@42,58
-//!@Delete:@3,5
-//!@New:
-    log::info!("processing");
-    validate_input()?;
-//!@Off:Location
-//!@Off:Open
-```
+| 类型 | 命令 | 说明 |
+|------|------|------|
+| 文件编辑 | `Open` | 打开文件/目录，加载到内存 |
+| | `Location` | 基于 content + diff_taps 的语义匹配定位 |
+| | `New` | 在定位位置插入内容 |
+| | `Delete` | 删除匹配的连续内容 |
+| | `Raw` | 字面量内容（仅展开，融入父命令） |
+| 系统操作 | `Bash` | 执行 bash 命令（安全审查） |
+| | `Exec` | 直连终端执行（值输出） |
+| | `Read` | 读取文件内容并显示（带高亮和行号） |
+| | `Write` | 将内容写入文件 |
+| 元命令 | `Include` | 动态导入外部命令 |
+| | `WorkPath` | 设置工作路径 |
+| | `Get` | 从数据池取出内容 |
 
-### 删除整个函数并替换（Rust）
-
-```ned
-//!@Open: src/parser.rs
-//!@Location:Block
-fn old_parser(input: &str) -> ParseResult {
-//!@Delete:Block
-//!@New:
-fn new_parser(input: &str) -> ParseResult {
-    let tokens = lexer::tokenize(input)?;
-    let ast = grammar::parse(&tokens)?;
-    Ok(ast)
-}
-...
-//!@Off:Open
-```
-
-## 命令速查
-
-| 命令 | 说明 |
-|------|------|
-| `Open:` | 打开目标文件 |
-| `Location:` | 定位代码位置（支持嵌套，逐级缩小范围） |
-| `Location:@行号` | 按行号直接定位，跳过匹配流程 |
-| `Location:Block` | 定位完整代码块 |
-| `New:` | 在定位位置后插入 |
-| `New:Start` | 在文件/Block 开头插入 |
-| `New:End` | 在文件/Block 末尾追加 |
-| `Delete:` | 删除匹配的连续行 |
-| `Delete:@行号` | 按行号直接删除 |
-| `Delete:Block` | 删除整个代码块 |
-| `Raw:` | 字面量内容（解决 `...` 二义性） |
-| `Off:Open` / `Off:Location` / `Off:New` | 关闭作用域 |
-
-> 完整语法和错误处理见 [docs/grammar.md](docs/grammar.md)
-
-## 实现状态
+## 实现阶段
 
 ```
-Phase 1: Open / Location / Off        ✅ 已完成
-Phase 2: New / Delete                 ✅ 已完成
-Phase 3: Location:Block / Delete:Block ✅ 已完成
-Phase 4: 嵌套 Location                 ✅ 已完成
-Phase 5: 行号定位 + Raw 命令           ✅ 已完成
-Phase 6: 错误美化 / 彩色输出           ✅ 已完成
-Phase 7: 扩展命令（Include 等）        待实现
+Phase 0: 项目骨架搭建           ✅ 已完成
+Phase 1: Lexer + Parser         进行中
+Phase 2: 迁移 n_edit 核心命令   待实现
+Phase 3: Bash / Exec / Read / Write  待实现
+Phase 4: Include + WorkPath     待实现
+Phase 5: Capture / Get / pools  待实现
+Phase 6: 错误处理 + 终端输出     待实现
 ```
-
-## 支持的语言
-
-| 语言 | 普通 Location | Block 操作 |
-|------|:---:|:---:|
-| Rust | ✓ | ✓ |
-| C / C++ / JS / TypeScript / Java | ✓ | ✓ |
-| Python / YAML | ✓ | ✓ |
-| Markdown / 纯文本 | ✓ | — |
 
 ## 开发
 
 ```bash
-cargo build              # 构建
-cargo test               # 297 个测试
-cargo fmt --check        # 格式检查
-cargo clippy -- -D warnings  # Lint
+# 构建
+cargo build
+
+# 测试（全 workspace）
+cargo test --workspace
+
+# 单独测试 ncs
+cargo test -p ncs
+
+# Lint & 格式
+cargo clippy --workspace -- -D warnings
+cargo fmt --check
+
+# 运行
+cargo run -p n_edit -- script.ned
+cargo run -p ncs -- script.ncs --verbose
 
 # Nix 环境
 nix develop
-cargo nextest run        # 更快运行测试
+cargo nextest run
 ```
 
-## 项目结构
+## 文档索引
 
-```
-src/
-  main.rs      # CLI 入口
-  lexer.rs     # 词法分析：//!@ 识别 → Token 流（含 @行号 和 Raw）
-  parser.rs    # 语法分析：Token → Command AST
-  engine.rs    # 执行引擎：状态机，逐条执行命令（含行号/嵌套 Location）
-  matcher.rs   # 核心匹配算法（含 SearchScope 抽象 + 行号直取）
-  block.rs     # Block 解析（花括号/缩进）
-  model.rs     # 数据结构定义（含 LineRange、LineNumber newtype）
-  error.rs     # 错误类型集中定义
-  output.rs    # 彩色终端输出
-tests/
-  data/        # 测试用真实源码（Rust/Python/YAML/Markdown）
-  scripts/     # .ned 测试脚本（含行号定位和多操作复合场景）
-docs/
-  grammar.md   # .ned 语法手册
-  phases.md    # 实现阶段拆分
-  INSTRUCTION.md  # 详细实现指令
-```
+| 文档 | 内容 |
+|------|------|
+| [docs/INSTRUCTION.md](docs/INSTRUCTION.md) | 总体设计路径、数据结构、算法流程、代码规范 |
+| [docs/ncs_dev.md](docs/ncs_dev.md) | NCS 命令定义、执行流、错误体系 |
+| [docs/n_edit_dev.md](docs/n_edit_dev.md) | n_edit 语法设计和命令机制 |
+| [docs/ncoding.md](docs/ncoding.md) | N-coding TUI agent 设计 |
+| [docs/phases.md](docs/phases.md) | 实现阶段拆分和进度追踪 |
