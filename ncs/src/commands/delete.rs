@@ -441,7 +441,7 @@ mod tests {
         .unwrap();
 
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -477,7 +477,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(
             result.is_ok(),
             "Delete should succeed when matching on snapshot, got: {:?}",
@@ -503,7 +503,7 @@ mod tests {
         .unwrap();
 
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -557,7 +557,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(
             result.is_ok(),
             "Delete should still find 'let b = 2' in snapshot, got: {:?}",

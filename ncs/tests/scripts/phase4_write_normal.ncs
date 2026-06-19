@@ -1,0 +1,4 @@
+!@Write Normal ./tests/data/output_write.txt
+hello from write command
+line two here
+@/Write

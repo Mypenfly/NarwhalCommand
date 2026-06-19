@@ -22,15 +22,21 @@ struct TestEnv {
     target_path: String,
 }
 
+/// 获取 ncs crate 根目录的绝对路径（解决 WorkPath 改变 CWD 导致相对路径解析失败）
+fn ncs_dir() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
 impl TestEnv {
     /// 从 ncs/tests/data/ 复制所有数据文件到临时目录
     fn from_data_file(data_file: &str) -> Self {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
 
         // 复制所有数据文件以确保脚本引用的任何文件都存在
-        let data_dir = Path::new("tests/data");
+        // 使用绝对路径，避免 WorkPath 改变 CWD 后相对路径失效
+        let data_dir = ncs_dir().join("tests").join("data");
         if data_dir.exists() {
-            for entry in std::fs::read_dir(data_dir).expect("Failed to read data dir") {
+            for entry in std::fs::read_dir(&data_dir).expect("Failed to read data dir") {
                 let entry = entry.expect("Failed to read entry");
                 let file_name = entry.file_name();
                 let src = entry.path();
@@ -50,26 +56,43 @@ impl TestEnv {
 
     /// 读取 .ncs 脚本并替换 Open 路径为临时路径
     fn load_script(&self, script_name: &str) -> String {
-        let script_path = Path::new("tests/scripts").join(script_name);
+        // 使用绝对路径，避免 WorkPath 改变 CWD 后相对路径失效
+        let script_path = ncs_dir().join("tests").join("scripts").join(script_name);
         let script = std::fs::read_to_string(&script_path)
             .unwrap_or_else(|_| panic!("Failed to read script {}", script_path.display()));
         self.replace_paths(&script)
     }
 
-    /// 将脚本中 !@Open 路径替换为临时目录中的路径
+    /// 将脚本中 !@Open / !@Write / !@Read 路径替换为临时目录中的路径
     fn replace_paths(&self, script: &str) -> String {
+        let temp_dir = Path::new(&self.target_path).parent().unwrap();
         script
             .lines()
             .map(|line| {
-                if line.starts_with("!@Open ") {
-                    let original = line.strip_prefix("!@Open ").unwrap().trim();
-                    let file_name = Path::new(original)
+                let resolve_path = |prefix: &str| -> String {
+                    let original = line.strip_prefix(prefix).unwrap().trim();
+                    // 分离出命令参数（去掉后缀参数如 start=1 end=10）
+                    let path_part = original.split_whitespace().next().unwrap_or(original);
+                    let file_name = Path::new(path_part)
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .unwrap_or(original);
-                    let temp_dir = Path::new(&self.target_path).parent().unwrap();
+                        .unwrap_or(path_part);
                     let resolved = temp_dir.join(file_name);
-                    format!("!@Open {}", resolved.to_str().unwrap())
+                    let rest = original.strip_prefix(path_part).unwrap_or("");
+                    format!("{}{}{}", prefix, resolved.to_str().unwrap(), rest)
+                };
+
+                if line.starts_with("!@Open ") {
+                    resolve_path("!@Open ")
+                } else if line.starts_with("!@Write Normal ") {
+                    resolve_path("!@Write Normal ")
+                } else if line.starts_with("!@Write Raw ") {
+                    resolve_path("!@Write Raw ")
+                } else if line.starts_with("!@Read ") {
+                    resolve_path("!@Read ")
+                } else if line.starts_with("!@WorkPath ") && !line.contains("NONEXISTENT") {
+                    // !@WorkPath 使用临时目录（脚本里写的是占位路径）
+                    format!("!@WorkPath {}", temp_dir.to_str().unwrap())
                 } else {
                     line.to_string()
                 }
@@ -87,14 +110,14 @@ impl TestEnv {
 
 /// 执行 NCS 脚本的完整流水线
 fn execute_script(script: &str) -> Result<Engine, String> {
-    let registry = CommandRegistry::init();
+    let mut registry = CommandRegistry::init();
     let tokens =
         ncs::lexer::Lexer::tokenize(script, &registry).map_err(|e| format!("Lexer: {}", e))?;
     let commands =
         ncs::parser::Parser::parse(tokens, &registry).map_err(|e| format!("Parser: {}", e))?;
     let mut engine = Engine::new();
     engine
-        .execute(commands, &registry)
+        .execute(commands, &mut registry)
         .map_err(|e| format!("Engine: {}", e))?;
     Ok(engine)
 }
@@ -970,4 +993,182 @@ fn test_ncs_script_suffix_valid() {
     let path = Path::new("test.ncs");
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     assert_eq!(ext, "ncs");
+}
+
+// ============================================================
+// Phase 4: Write 命令集成测试
+// ============================================================
+
+#[test]
+fn test_phase4_write_normal_creates_file() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_write_normal.ncs");
+    let engine = execute_script(&script).expect("Write Normal should succeed");
+
+    assert!(engine.diff_lines.is_empty(), "Write has no diff output");
+
+    // 验证文件被创建
+    let temp_dir = Path::new(&env.target_path).parent().unwrap();
+    let written = temp_dir.join("output_write.txt");
+    assert!(written.exists(), "Write should create output_write.txt");
+    let content = std::fs::read_to_string(&written).unwrap();
+    assert!(content.contains("hello from write command"));
+    assert!(content.contains("line two here"));
+}
+
+#[test]
+fn test_phase4_write_overwrites_file() {
+    let env = TestEnv::from_data_file("plain.txt");
+    // 先执行第一次写入
+    let script1 = env.load_script("phase4_write_normal.ncs");
+    execute_script(&script1).expect("first Write should succeed");
+
+    // 再执行覆盖写入
+    let script2 = env.load_script("phase4_write_overwrite.ncs");
+    let engine = execute_script(&script2).expect("overwrite Write should succeed");
+
+    assert!(engine.diff_lines.is_empty());
+
+    let temp_dir = Path::new(&env.target_path).parent().unwrap();
+    let written = temp_dir.join("output_write.txt");
+    let content = std::fs::read_to_string(&written).unwrap();
+    assert_eq!(content.trim(), "overwritten content");
+}
+
+// ============================================================
+// Phase 4: Read 命令集成测试
+// ============================================================
+
+#[test]
+fn test_phase4_read_file_succeeds() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_read_file.ncs");
+    let engine = execute_script(&script).expect("Read should succeed");
+
+    // Read 是值输出，last_result 应为 None
+    assert!(engine.last_result.is_none(), "Read is value output");
+
+    // 原始数据文件不受影响
+    let original = env.read_target();
+    assert!(!original.is_empty());
+}
+
+#[test]
+fn test_phase4_read_nonexistent_fails() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_read_nonexistent.ncs");
+    let result = execute_script(&script);
+    assert!(result.is_err(), "Read of nonexistent file should error");
+}
+
+// ============================================================
+// Phase 4: Bash 命令集成测试
+// ============================================================
+
+#[test]
+fn test_phase4_bash_echo_succeeds() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_bash_echo.ncs");
+    let engine = execute_script(&script).expect("Bash echo should succeed");
+
+    // Bash 是流输出，检查 last_result 包含输出
+    let last = engine.last_result.as_ref().expect("Bash is stream output");
+    assert!(last.content.raw_content.contains("hello_from_ncs_bash"));
+}
+
+#[test]
+fn test_phase4_bash_security_denied() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_bash_security_denied.ncs");
+    let result = execute_script(&script);
+    assert!(result.is_err(), "sudo should be denied by security check");
+}
+
+// ============================================================
+// Phase 4: Exec 命令集成测试
+// ============================================================
+
+#[test]
+fn test_phase4_exec_echo_succeeds() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_exec_echo.ncs");
+    let engine = execute_script(&script).expect("Exec echo should succeed");
+
+    // Exec 是值输出
+    assert!(engine.last_result.is_none(), "Exec is value output");
+}
+
+// ============================================================
+// Phase 4: WorkPath 命令集成测试
+// ============================================================
+
+#[test]
+fn test_phase4_work_path_succeeds() {
+    let original_dir = std::env::current_dir().expect("should get current dir");
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_work_path.ncs");
+    let engine = execute_script(&script).expect("WorkPath should succeed");
+    assert!(engine.diff_lines.is_empty());
+    // 恢复原工作目录，避免影响后续测试
+    std::env::set_current_dir(&original_dir).ok();
+}
+
+#[test]
+fn test_phase4_work_path_nonexistent_fails() {
+    let original_dir = std::env::current_dir().expect("should get current dir");
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_work_path_nonexistent.ncs");
+    let result = execute_script(&script);
+    assert!(result.is_err(), "WorkPath to nonexistent dir should fail");
+    std::env::set_current_dir(&original_dir).ok();
+}
+
+// ============================================================
+// Phase 4: Include 命令集成测试
+// ============================================================
+
+#[test]
+fn test_phase4_include_register_succeeds() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_include.ncs");
+    let engine = execute_script(&script).expect("Include should succeed");
+    assert!(engine.diff_lines.is_empty());
+}
+
+#[test]
+fn test_phase4_include_alias_conflict_fails() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let script = env.load_script("phase4_include_conflict.ncs");
+    let result = execute_script(&script);
+    assert!(
+        result.is_err(),
+        "Include alias 'Open' should conflict with builtin"
+    );
+}
+
+// ============================================================
+// Phase 4: 命令组合集成测试
+// ============================================================
+
+#[test]
+fn test_phase4_write_then_read() {
+    let env = TestEnv::from_data_file("plain.txt");
+    let temp_dir = Path::new(&env.target_path).parent().unwrap();
+
+    // 手动构造脚本：先 Write 再 Read 同一个文件
+    let out_path = temp_dir.join("write_then_read.txt");
+    let script = format!(
+        "!@Write Normal {}\nwritten by ncs\n@/Write\n!@Read {}",
+        out_path.to_str().unwrap(),
+        out_path.to_str().unwrap(),
+    );
+
+    let engine = execute_script(&script).expect("Write+Read should succeed");
+    assert!(
+        engine.last_result.is_none(),
+        "Read is value output, discard after"
+    );
+
+    let content = std::fs::read_to_string(&out_path).unwrap();
+    assert_eq!(content, "written by ncs");
 }

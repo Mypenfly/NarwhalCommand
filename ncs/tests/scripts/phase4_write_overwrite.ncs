@@ -1,0 +1,3 @@
+!@Write Normal ./tests/data/output_write.txt
+overwritten content
+@/Write

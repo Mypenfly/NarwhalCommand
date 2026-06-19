@@ -104,12 +104,12 @@ impl Lexer {
 
                 if token.is_block() {
                     // 提取块内容
-                    let cmd_name = match &token {
-                        Token::Command { name, .. } => name.clone(),
+                    let (cmd_name, cmd_mode) = match &token {
+                        Token::Command { name, mode, .. } => (name.clone(), mode.clone()),
                         _ => unreachable!(),
                     };
                     let (content_lines, next_index) =
-                        Self::extract_block_content(&lines, index, registry, &cmd_name)?;
+                        Self::extract_block_content(&lines, index, registry, &cmd_name, &cmd_mode)?;
                     tokens.push(Self::set_content_lines(token, content_lines));
                     index = next_index;
                 } else {
@@ -174,41 +174,34 @@ impl Lexer {
 
         let cmd_name = parts[0];
 
-        // 查找命令注册表
-        let command_entry =
-            registry
-                .find_command(cmd_name)
-                .ok_or_else(|| ParseError::UnknownCommand {
-                    token: cmd_name.to_string(),
-                    line: line_number,
-                })?;
+        // 查找命令注册表 — 若未找到则不报错，创建宽容的 line-exec Token
+        // 由引擎在运行时（Include 注册后）进行最终校验和分派
+        let command_entry = registry.find_command(cmd_name);
 
-        let is_block = command_entry.cmd_type.is_block_exec();
-
-        // 解析 pre_mode 和 args
-        let (mode, positional_args, args) = if parts.len() >= 2 {
-            let potential_mode = parts[1];
-            // 检查 pre_mode 是否与某个已知模式匹配（不区分大小写）
-            let mode_normalized = normalize_command_name(potential_mode);
-            let mode_found = command_entry
-                .modes
-                .keys()
-                .any(|k| normalize_command_name(k) == mode_normalized);
-            if mode_found {
-                // 匹配到模式，剩余为位置参数和键值参数
-                let (pos, kv) = parse_remaining_args(&parts[2..]);
-                (potential_mode.to_string(), pos, kv)
-            } else if potential_mode.contains('=') {
-                // 第一个 token 就是 key=value，无模式，无位置参数
-                let (pos, kv) = parse_remaining_args(&parts[1..]);
-                (String::new(), pos, kv)
+        let (is_block, mode, positional_args, args) = if let Some(entry) = command_entry {
+            let is_block = entry.cmd_type.is_block_exec();
+            let (mode, positional_args, args) = if parts.len() >= 2 {
+                let potential_mode = parts[1];
+                let mode_normalized = normalize_command_name(potential_mode);
+                let mode_found = entry
+                    .modes
+                    .keys()
+                    .any(|k| normalize_command_name(k) == mode_normalized);
+                if mode_found {
+                    let (pos, kv) = parse_remaining_args(&parts[2..]);
+                    (potential_mode.to_string(), pos, kv)
+                } else {
+                    let (pos, kv) = parse_remaining_args(&parts[1..]);
+                    (String::new(), pos, kv)
+                }
             } else {
-                // 不匹配任何模式 → 作为位置参数，模式默认空
-                let (pos, kv) = parse_remaining_args(&parts[1..]);
-                (String::new(), pos, kv)
-            }
+                (String::new(), Vec::new(), HashMap::new())
+            };
+            (is_block, mode, positional_args, args)
         } else {
-            (String::new(), Vec::new(), HashMap::new())
+            // 未知命令：默认行执行，无模式，所有后续词为位置参数
+            let (pos, kv) = parse_remaining_args(&parts[1..]);
+            (false, String::new(), pos, kv)
         };
 
         Ok(Token::Command {
@@ -236,11 +229,21 @@ impl Lexer {
         start_index: usize,
         registry: &CommandRegistry,
         cmd_name: &str,
+        cmd_mode: &str,
     ) -> Result<(Vec<String>, usize), ParseError> {
         let total = lines.len();
         let mut content_lines: Vec<String> = Vec::new();
         let mut next_index = start_index + 1;
         let cmd_name_upper = cmd_name.to_uppercase();
+
+        // Write Raw 模式：从下一行到 EOF 全部原样提取，不解析任何命令/关闭符
+        if cmd_name_upper == "WRITE" && cmd_mode.to_uppercase() == "RAW" {
+            while next_index < total {
+                content_lines.push(lines[next_index].to_string());
+                next_index += 1;
+            }
+            return Ok((content_lines, next_index));
+        }
 
         while next_index < total {
             let line = lines[next_index];
@@ -250,7 +253,7 @@ impl Lexer {
                 let close_name = line
                     .trim_start()
                     .strip_prefix("@/")
-                    .map(|r| r.trim().split_whitespace().next().unwrap_or(""))
+                    .map(|r| r.split_whitespace().next().unwrap_or(""))
                     .unwrap_or("");
                 // @/Open / @/Off 为根关闭符，@/Location 为块上下文关闭符；
                 // 这三者始终终止任何已开启的块内容提取。
@@ -708,15 +711,25 @@ mod tests {
 
     #[test]
     fn test_unknown_command_returns_error() {
+        // 未知命令现在被宽容处理为 line-exec Token，不再报错
+        // 由引擎在运行时根据 Include 动态注册的 registry 进行校验
         let registry = test_registry();
         let result = Lexer::tokenize("!@UnknownCmd foo bar", &registry);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ParseError::UnknownCommand { token, line } => {
-                assert_eq!(token, "UnknownCmd");
-                assert_eq!(line, 1);
+        assert!(result.is_ok(), "Unknown commands are tolerated by lexer");
+        let tokens = result.unwrap();
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            Token::Command {
+                name,
+                positional_args,
+                is_block,
+                ..
+            } => {
+                assert_eq!(name, "UnknownCmd");
+                assert!(!is_block, "Unknown command defaults to line exec");
+                assert_eq!(positional_args, &vec!["foo".to_string(), "bar".to_string()]);
             }
-            _ => panic!("Expected UnknownCommand error"),
+            _ => panic!("Expected Command token"),
         }
     }
 
@@ -904,5 +917,89 @@ fn main() {
         assert!(matches!(&tokens[0], Token::Command { name, .. } if name == "Location"));
         assert!(matches!(&tokens[1], Token::Command { name, .. } if name == "New"));
         assert!(matches!(&tokens[2], Token::Close { name, .. } if name == "Open"));
+    }
+
+    #[test]
+    fn test_write_raw_extracts_to_eof_not_stopping_at_commands() {
+        let registry = test_registry();
+        let script = concat!(
+            "!@Write Raw ./output.txt\n",
+            "line one\n",
+            "!@Bash echo hello\n", // 这行不应被解析为命令
+            "@/Write\n",           // 这行也不应触发终止
+            "!@New\n",             // 这行也不应触发终止
+            "last line\n",
+        );
+        let tokens = Lexer::tokenize(script, &registry).unwrap();
+        assert_eq!(
+            tokens.len(),
+            1,
+            "Write Raw should produce only 1 token, got {:?}",
+            tokens
+        );
+        match &tokens[0] {
+            Token::Command {
+                name,
+                mode,
+                content_lines,
+                ..
+            } => {
+                assert_eq!(name, "Write");
+                assert_eq!(mode, "Raw");
+                // 应该包含 !@Cmd 后的所有行（从下一行到EOF）
+                assert!(
+                    content_lines.len() >= 5,
+                    "Write Raw should extract all remaining lines, got {} lines: {:?}",
+                    content_lines.len(),
+                    content_lines
+                );
+                assert_eq!(content_lines[0], "line one");
+                assert!(
+                    content_lines.contains(&"!@Bash echo hello".to_string()),
+                    "!@Bash should be captured as raw text, not parsed"
+                );
+                assert!(
+                    content_lines.contains(&"@/Write".to_string()),
+                    "@/Write should be captured as raw text, not trigger close"
+                );
+                assert!(
+                    content_lines.contains(&"!@New".to_string()),
+                    "!@New should be captured as raw text, not trigger stop"
+                );
+                assert!(
+                    content_lines.contains(&"last line".to_string()),
+                    "last line should be captured"
+                );
+            }
+            _ => panic!("Expected Command token for Write, got {:?}", tokens[0]),
+        }
+    }
+
+    #[test]
+    fn test_unknown_command_not_in_registry_does_not_error() {
+        // Include 注册的命令应该能被 lexer 宽容处理
+        let registry = test_registry();
+        let script = "!@Web rust programming";
+        let tokens = Lexer::tokenize(script, &registry).unwrap();
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            Token::Command {
+                name,
+                mode,
+                positional_args,
+                is_block,
+                ..
+            } => {
+                assert_eq!(name, "Web");
+                assert!(mode.is_empty());
+                // 未知命令默认行执行
+                assert!(!is_block, "Unknown command should default to line exec");
+                assert_eq!(
+                    positional_args,
+                    &vec!["rust".to_string(), "programming".to_string()]
+                );
+            }
+            _ => panic!("Expected Command token"),
+        }
     }
 }

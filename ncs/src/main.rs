@@ -68,7 +68,7 @@ fn main() {
         );
     }
 
-    let registry = ncs::registry::CommandRegistry::init();
+    let mut registry = ncs::registry::CommandRegistry::init();
 
     let tokens = match ncs::lexer::Lexer::tokenize(&script_content, &registry) {
         Ok(tokens) => tokens,
@@ -102,16 +102,21 @@ fn main() {
 
     let mut engine = ncs::engine::Engine::new();
     engine.set_verbose(cli.verbose);
+    // 将脚本的父目录设为初始 work_path
+    engine.work_path = script_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    match engine.execute(commands, &registry) {
+    match engine.execute(commands, &mut registry) {
         Ok(()) => {
             if !cli.quiet {
                 if !engine.diff_lines.is_empty() {
                     let formatter = OutputFormatter::new();
                     let formatted = formatter.format_diff_lines(&engine.diff_lines);
                     println!("{}", formatted);
-                } else {
-                    println!("脚本执行完成，无文件变更。");
+                } else if !engine.had_output {
+                    println!("(no output)");
                 }
             }
         }
@@ -152,14 +157,14 @@ mod tests {
 
     /// 执行完整的 lexer → parser → engine 流水线，返回 engine
     fn run_full_pipeline(script: &str) -> Result<Engine, String> {
-        let registry = CommandRegistry::init();
+        let mut registry = CommandRegistry::init();
         let tokens =
             ncs::lexer::Lexer::tokenize(script, &registry).map_err(|e| format!("Lexer: {}", e))?;
         let commands =
             ncs::parser::Parser::parse(tokens, &registry).map_err(|e| format!("Parser: {}", e))?;
         let mut engine = Engine::new();
         engine
-            .execute(commands, &registry)
+            .execute(commands, &mut registry)
             .map_err(|e| format!("Engine: {}", e))?;
         Ok(engine)
     }

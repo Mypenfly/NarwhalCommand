@@ -35,6 +35,8 @@ pub struct CommandEntry {
     pub name: String,
     /// 外部命令的执行路径（内置命令为 None）
     pub exec_path: Option<PathBuf>,
+    /// 外部命令的执行策略（默认直接执行）
+    pub exec_method: ExecMethod,
     /// 命令类型（权限 + 执行方式）
     pub cmd_type: CommandType,
     /// 模式注册表：模式名 → 模式信息
@@ -47,6 +49,17 @@ pub struct CommandEntry {
     /// 格式: [(所属命令名, 所属模式列表)]
     /// 空列表表示该所属命令的所有模式都可以
     pub owners: Vec<(String, Vec<String>)>,
+}
+
+/// 外部命令的执行策略
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecMethod {
+    /// 直接通过 std::process::Command 执行
+    Default,
+    /// 通过 bash -c 执行
+    Bash,
+    /// 通过 script -c 直连终端执行
+    Script,
 }
 
 /// 命令类型
@@ -254,6 +267,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Open".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::with_output(
                     PermissionType::FileRead,
                     ExecutionType::LineExec,
@@ -302,6 +316,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Location".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::with_output(
                     PermissionType::FileRead,
                     ExecutionType::BlockExec,
@@ -348,6 +363,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "New".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::new(PermissionType::FileWrite, ExecutionType::BlockExec),
                 modes: new_modes,
                 subs: vec![],
@@ -384,6 +400,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Delete".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::new(PermissionType::FileWrite, ExecutionType::BlockExec),
                 modes: delete_modes,
                 subs: vec![],
@@ -410,6 +427,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Raw".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::new(PermissionType::None, ExecutionType::ExpandOnly),
                 modes: raw_modes,
                 subs: vec![],
@@ -432,6 +450,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Bash".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::with_output(
                     PermissionType::ProgramExec,
                     ExecutionType::LineExec,
@@ -458,6 +477,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Exec".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::with_output(
                     PermissionType::ProgramExec,
                     ExecutionType::LineExec,
@@ -492,6 +512,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Read".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::with_output(
                     PermissionType::FileRead,
                     ExecutionType::LineExec,
@@ -526,6 +547,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Write".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::with_output(
                     PermissionType::FileWrite,
                     ExecutionType::BlockExec,
@@ -589,6 +611,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Include".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::new(PermissionType::ProgramExec, ExecutionType::LineExec),
                 modes: include_modes,
                 subs: vec![],
@@ -611,6 +634,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "WorkPath".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::new(PermissionType::None, ExecutionType::LineExec),
                 modes: work_path_modes,
                 subs: vec![],
@@ -638,6 +662,7 @@ impl CommandRegistry {
             CommandEntry {
                 name: "Get".to_string(),
                 exec_path: None,
+                exec_method: ExecMethod::Default,
                 cmd_type: CommandType::with_output(
                     PermissionType::None,
                     ExecutionType::ExpandOnly,
@@ -803,6 +828,7 @@ mod tests {
         let entry = CommandEntry {
             name: "TestCmd".to_string(),
             exec_path: Some(PathBuf::from("/usr/bin/test")),
+            exec_method: ExecMethod::Default,
             cmd_type: CommandType::new(PermissionType::ProgramExec, ExecutionType::LineExec),
             modes: HashMap::new(),
             subs: vec![],
@@ -819,6 +845,7 @@ mod tests {
         let entry = CommandEntry {
             name: "Open".to_string(),
             exec_path: Some(PathBuf::from("/custom/open")),
+            exec_method: ExecMethod::Default,
             cmd_type: CommandType::new(PermissionType::FileRead, ExecutionType::LineExec),
             modes: HashMap::new(),
             subs: vec![],

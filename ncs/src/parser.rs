@@ -72,6 +72,8 @@ pub enum Command {
     },
     /// Read 命令：读取文件内容并显示
     Read {
+        /// 模式
+        mode: ReadMode,
         /// 文件路径
         path: String,
         /// 参数列表
@@ -105,6 +107,13 @@ pub enum Command {
         /// 伪装为某个命令
         like: Option<String>,
     },
+    /// 外部/动态注册命令（由 Include 导入）
+    External {
+        /// 命令名
+        name: String,
+        /// 位置参数列表
+        positional_args: Vec<String>,
+    },
     /// 关闭符号
     Close {
         /// 关闭的命令名
@@ -136,6 +145,7 @@ impl Command {
             Command::WorkPath { .. } => "WORKPATH".to_string(),
             Command::Get { .. } => "GET".to_string(),
             Command::Capture { .. } => "CAPTURE".to_string(),
+            Command::External { name, .. } => name.to_uppercase(),
             Command::Close { .. } => "CLOSE".to_string(),
         }
     }
@@ -223,6 +233,15 @@ pub enum DeleteMode {
     Normal,
     /// 删除整个 ContentBlock
     Block,
+}
+
+/// Read 命令的模式
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum ReadMode {
+    /// 读取单个文本文件
+    Normal,
+    /// 读取目录，列出文件列表
+    Dir,
 }
 
 /// Write 命令的模式
@@ -329,9 +348,9 @@ impl Parser {
                 Ok(Command::WorkPath { path })
             }
             "GET" => Self::parse_get(args, positional_args, line),
-            _ => Err(ParseError::UnknownCommand {
-                token: cmd_name.to_string(),
-                line,
+            _ => Ok(Command::External {
+                name: cmd_name.to_string(),
+                positional_args: positional_args.to_vec(),
             }),
         }
     }
@@ -343,21 +362,18 @@ impl Parser {
         positional_args: &[String],
         line: crate::model::LineNumber,
     ) -> Result<Command, ParseError> {
+        let path = positional_args.first().cloned().unwrap_or_default();
+
         let mode = if mode_str.is_empty() {
-            OpenMode::Normal
+            // 无显式模式时，根据路径自动检测
+            auto_detect_open_mode(&path)
         } else {
             match normalize_command_name(mode_str).as_str() {
                 "NORMAL" => OpenMode::Normal,
                 "DIR" => OpenMode::Dir,
-                _ => {
-                    // 不认识的模式当作位置参数处理
-                    OpenMode::Normal
-                }
+                _ => OpenMode::Normal,
             }
         };
-
-        // 第一个位置参数是 path
-        let path = positional_args.first().cloned().unwrap_or_default();
 
         // 校验必要参数
         Self::validate_params(
@@ -473,6 +489,18 @@ impl Parser {
         line: crate::model::LineNumber,
     ) -> Result<Command, ParseError> {
         let path = positional_args.first().cloned().unwrap_or_default();
+
+        let mode = if mode_str.is_empty() {
+            // 无显式模式时，根据路径自动检测
+            auto_detect_read_mode(&path)
+        } else {
+            match normalize_command_name(mode_str).as_str() {
+                "NORMAL" => ReadMode::Normal,
+                "DIR" => ReadMode::Dir,
+                _ => ReadMode::Normal,
+            }
+        };
+
         // Read 的模式和参数与 Open 一致
         Self::validate_params(
             "Read",
@@ -486,6 +514,7 @@ impl Parser {
             ],
         )?;
         Ok(Command::Read {
+            mode,
             path,
             args: args.clone(),
         })
@@ -531,7 +560,8 @@ impl Parser {
         positional_args: &[String],
         line: crate::model::LineNumber,
     ) -> Result<Command, ParseError> {
-        let path = positional_args.first().cloned().unwrap_or_default();
+        // 所有位置参数拼接为外部命令的完整执行指令
+        let path = positional_args.join(" ");
 
         // 校验 alias 是必要参数
         if let Some(alias) = args.get("alias") {
@@ -662,6 +692,33 @@ fn resolve_mode<T: Copy>(
         }
     }
     default
+}
+
+/// 根据路径自动检测 Open 模式（文件 → Normal，目录 → Dir）
+fn auto_detect_open_mode(path: &str) -> OpenMode {
+    let p = std::path::Path::new(path);
+    // 先检查原始路径，再尝试相对于 ncs crate 目录
+    if p.is_dir() {
+        return OpenMode::Dir;
+    }
+    let manifest_relative = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+    if manifest_relative.is_dir() {
+        return OpenMode::Dir;
+    }
+    OpenMode::Normal
+}
+
+/// 根据路径自动检测 Read 模式（文件 → Normal，目录 → Dir）
+fn auto_detect_read_mode(path: &str) -> ReadMode {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        return ReadMode::Dir;
+    }
+    let manifest_relative = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+    if manifest_relative.is_dir() {
+        return ReadMode::Dir;
+    }
+    ReadMode::Normal
 }
 
 /// 从 content_lines 解析 LocationContent
@@ -1068,13 +1125,90 @@ mod tests {
     fn test_parse_read() {
         let commands = lex_and_parse("!@Read ./test.rs").unwrap();
         assert_eq!(commands.len(), 1);
-        assert_eq!(
-            commands[0],
-            Command::Read {
-                path: "./test.rs".to_string(),
-                args: HashMap::new(),
+        match &commands[0] {
+            Command::Read { mode, path, args } => {
+                assert_eq!(*mode, ReadMode::Normal);
+                assert_eq!(path, "./test.rs");
+                assert!(args.is_empty());
             }
-        );
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_read_auto_detect_dir_mode() {
+        // 不指定模式时，自动检测路径类型
+        // 路径相对于 ncs crate 根目录 (CARGO_MANIFEST_DIR)
+        let commands = lex_and_parse("!@Read tests/data").unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::Read { mode, path, .. } => {
+                assert_eq!(*mode, ReadMode::Dir, "应该自动检测为 Dir 模式");
+                assert_eq!(path, "tests/data");
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_read_auto_detect_normal_mode() {
+        let commands = lex_and_parse("!@Read tests/data/plain.txt").unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::Read { mode, path, .. } => {
+                assert_eq!(*mode, ReadMode::Normal, "应该自动检测为 Normal 模式");
+                assert_eq!(path, "tests/data/plain.txt");
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_read_explicit_dir_mode_overrides_auto_detect() {
+        let commands = lex_and_parse("!@Read Dir tests/data/plain.txt").unwrap();
+        match &commands[0] {
+            Command::Read { mode, .. } => {
+                assert_eq!(*mode, ReadMode::Dir, "显式 Dir 模式应保留");
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_open_auto_detect_dir_mode() {
+        let commands = lex_and_parse("!@Open tests/data").unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::Open { mode, path, .. } => {
+                assert_eq!(*mode, OpenMode::Dir, "应该自动检测为 Dir 模式");
+                assert_eq!(path, "tests/data");
+            }
+            _ => panic!("Expected Open command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_open_auto_detect_normal_mode() {
+        let commands = lex_and_parse("!@Open tests/data/plain.txt").unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::Open { mode, path, .. } => {
+                assert_eq!(*mode, OpenMode::Normal, "应该自动检测为 Normal 模式");
+                assert_eq!(path, "tests/data/plain.txt");
+            }
+            _ => panic!("Expected Open command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_open_explicit_normal_overrides_auto_detect() {
+        let commands = lex_and_parse("!@Open Normal tests/data").unwrap();
+        match &commands[0] {
+            Command::Open { mode, .. } => {
+                assert_eq!(*mode, OpenMode::Normal, "显式 Normal 模式应保留");
+            }
+            _ => panic!("Expected Open command"),
+        }
     }
 
     #[test]
@@ -1098,13 +1232,33 @@ mod tests {
 
     #[test]
     fn test_parse_write_raw() {
-        let commands =
-            lex_and_parse("!@Write Raw ./output.ncs\neverything here\nis raw\n@/Write").unwrap();
-        assert_eq!(commands.len(), 2);
+        // Write Raw 提取从下一行到 EOF 的全部内容，
+        // 包括 @/Write、!@Open 等原本会触发终止的标记，
+        // 全部作为原始文本保存
+        let commands = lex_and_parse(
+            "!@Write Raw ./output.ncs\neverything here\nis raw\n@/Write\n!@New\nmore stuff",
+        )
+        .unwrap();
+        assert_eq!(
+            commands.len(),
+            1,
+            "Write Raw produces only 1 command (no Close)"
+        );
         match &commands[0] {
-            Command::Write { mode, path, .. } => {
+            Command::Write {
+                mode,
+                path,
+                content,
+                ..
+            } => {
                 assert_eq!(*mode, WriteMode::Raw);
                 assert_eq!(path, "./output.ncs");
+                let c = content.as_ref().expect("Write Raw should have content");
+                assert!(c.contains("everything here"));
+                assert!(c.contains("is raw"));
+                assert!(c.contains("@/Write"));
+                assert!(c.contains("!@New"));
+                assert!(c.contains("more stuff"));
             }
             _ => panic!("Expected Write command"),
         }
@@ -1217,11 +1371,20 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn test_unknown_command_error() {
-        let registry = test_registry();
-        // 使用一个未注册的命令名
-        let result = Lexer::tokenize("!@UnknownCmd test", &registry);
-        assert!(result.is_err());
+    fn test_unknown_command_becomes_external() {
+        // 未知命令不再报错，而是转为 Command::External
+        let commands = lex_and_parse("!@UnknownCmd foo bar").unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::External {
+                name,
+                positional_args,
+            } => {
+                assert_eq!(name, "UnknownCmd");
+                assert_eq!(positional_args, &vec!["foo".to_string(), "bar".to_string()]);
+            }
+            _ => panic!("Expected External command"),
+        }
     }
 
     // ============================================================

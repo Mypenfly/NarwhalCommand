@@ -359,21 +359,138 @@ Error: <标题>
 | 行号定位 | `@66,120` | 已移除，用嵌套 Location 替代 |
 | 扩展性 | 固定 5 个命令 | 12 个命令 + Include 动态扩展 |
 
-## 7. 开发命令
+## 7. 系统命令
 
-以下命令 Phase 4+ 实现：
+### 7.1 Bash — 执行系统命令
+
+```
+!@Bash <command>
+```
+
+通过 `bash -c` 执行命令，捕获 stdout/stderr。**流输出**。
+
+**安全审查**：以下模式被自动拦截：
+- `sudo` — 禁止提权
+- `rm -rf /` — 禁止递归删除根目录
+- `chmod 777 /` — 禁止对根目录设置 777 权限
+- `mkfs.` — 禁止格式化命令
+- `dd if=` — 禁止直接操作磁盘
+- `forkbomb` / `:(){ :|:& };:` — 禁止 fork 炸弹
+
+```ncs
+!@Bash echo "Current dir: $(pwd)"
+!@Bash grep "fn main" ./src/main.rs
+```
+
+### 7.2 Exec — 直连终端执行
+
+```
+!@Exec <command>
+```
+
+通过 `script -c` 直连终端执行，支持彩色输出、流式输出和交互。**值输出**（结果不保留）。
+
+```ncs
+!@Exec cargo build --release
+!@Exec git log --oneline -10
+```
+
+### 7.3 Read — 读取文件
+
+```
+!@Read [mode] <path> [options...]
+```
+
+读取文件内容并带格式显示。**值输出**（结果不保留）。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `path` | Path | 文件路径（必填） |
+
+```ncs
+!@Read ./src/main.rs
+!@Read /etc/hosts
+```
+
+### 7.4 Write — 写入文件
+
+```
+!@Write [mode] <path>
+写入内容...
+@/Write
+```
+
+| 模式 | 说明 |
+|------|------|
+| `Normal`（默认） | 将块内容写入文件（自动创建父目录） |
+| `Raw` | 从下一行到脚本末尾的全部内容原样写入（程序退出） |
+
+**Normal 模式**会检查路径是否为文件类型，路径不存在则自动创建父目录。**值输出**（结果不保留）。
+
+```ncs
+# 写入普通内容
+!@Write Normal ./output/result.txt
+第一阶段输出：
+总计处理 1,234 条记录。
+@/Write
+
+# Raw 模式：以下所有内容原样写入到 EOF
+!@Write Raw ./output/script.sh
+#!/bin/bash
+echo "this will not be parsed as NCS commands"
+!@NotACommand just raw text
+@/NotARealClose
+# 脚本在此退出，不再执行后续命令
+```
+
+### 7.5 Include — 导入外部命令
+
+```
+!@Include <path> alias=<name> [block=true] [type=StreamOutput] [exec=script]
+```
+
+动态注册外部命令到命令注册表。
+
+| 参数 | 必填 | 说明 |
+|------|:---:|------|
+| `alias` | 是 | 命令别名（禁止与内置命令重名） |
+| `block` | 否 | 是否支持块执行（默认 `false`） |
+| `type` | 否 | 输出类型：`StreamOutput` / `OnlyPrint`（默认 `OnlyPrint`） |
+| `exec` | 否 | 执行方式：`default` / `script` / `bash`（默认 `default`） |
+
+**校验**：alias 不与内置命令重名 → 返回 `AliasConflict` 错误。
+
+```ncs
+!@Include /usr/local/bin/mytool alias=MyTool type=StreamOutput
+!@Include ./tools/formatter.sh alias=Format exec=bash block=true
+```
+
+### 7.6 WorkPath — 设置工作目录
+
+```
+!@WorkPath <path>
+```
+
+修改进程当前工作目录，影响后续所有 `./`、`../` 路径的展开。
+
+- 路径必须存在，否则报错
+- 若路径为文件，取其父目录
+- 脚本中未遇到 `!@WorkPath` 时，工作路径默认为脚本文件的父目录
+
+```ncs
+!@WorkPath ./src/
+!@Open main.rs          # 相对于新的工作路径
+!@WorkPath /tmp/
+!@Bash ls -la           # 在新的工作路径下执行
+```
+
+## 8. 开发中命令
 
 | 命令 | 功能 | 状态 |
 |------|------|:----:|
-| `Bash` | 执行 bash 命令（安全审查） | Phase 4 |
-| `Exec` | 直连终端执行 | Phase 4 |
-| `Read` | 读取文件并高亮显示 | Phase 4 |
-| `Write` | 将块内容写入文件 | Phase 4 |
-| `Include` | 动态导入外部命令 | Phase 4 |
-| `WorkPath` | 设置工作路径 | Phase 4 |
 | `Get` (高级) | `like=...` 伪装模式 + 块内展开 | Phase 5 |
 
-## 8. 参考文档
+## 9. 参考文档
 
 | 文档 | 内容 |
 |------|------|

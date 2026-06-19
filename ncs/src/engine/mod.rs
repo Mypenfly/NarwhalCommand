@@ -70,6 +70,10 @@ pub struct Engine {
     pub pools: HashMap<String, CmdContent>,
     /// 详细模式
     verbose: bool,
+    /// 是否已产生过终端输出（用于决定是否打印默认 "(no output)"）
+    pub had_output: bool,
+    /// 当前工作路径基准（用于相对路径展开，默认来自脚本父目录）
+    pub work_path: std::path::PathBuf,
 
     // ========== Phase 3 新增字段 ==========
     /// 上一条命令的执行结果（供 Capture 捕获 + 下一命令输入）
@@ -88,6 +92,8 @@ impl Engine {
             exec_cmds: Vec::new(),
             pools: HashMap::new(),
             verbose: false,
+            had_output: false,
+            work_path: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             last_result: None,
         }
     }
@@ -118,7 +124,7 @@ impl Engine {
     pub fn execute(
         &mut self,
         commands: Vec<Command>,
-        registry: &CommandRegistry,
+        registry: &mut CommandRegistry,
     ) -> Result<(), NcsError> {
         for command in &commands {
             match command {
@@ -138,7 +144,7 @@ impl Engine {
                     let internal = command.convert(input)?;
 
                     // 3. execute_core: 核心操作
-                    let result = command.execute_core(self, internal)?;
+                    let result = command.execute_core(self, internal, registry)?;
 
                     // 4. out: 构建输出
                     let output = command.out(result, self);
@@ -146,7 +152,10 @@ impl Engine {
                     // 5. 确定输出类型（流/值）
                     let output_is_stream = self.is_stream_output(other, registry);
 
-                    // 6. 设置 last_result（供下一个命令使用）
+                    // 6. 打印输出（值输出/流输出/Write 特殊格式）
+                    self.print_command_output(other, &output);
+
+                    // 7. 设置 last_result（供下一个命令使用）
                     if output_is_stream {
                         self.last_result = Some(CommandResult {
                             content: output,
@@ -156,7 +165,7 @@ impl Engine {
                         self.last_result = None;
                     }
 
-                    // 7. 加入 exec_cmds
+                    // 8. 加入 exec_cmds
                     let cmd_name = other.cmd_name();
                     if cmd_name != "RAW" && cmd_name != "CAPTURE" && cmd_name != "GET" {
                         self.exec_cmds.push(ExecutedCommand {
@@ -170,6 +179,47 @@ impl Engine {
         }
 
         self.handle_implicit_close()
+    }
+
+    /// 打印命令的终端输出
+    ///
+    /// - 流输出命令（Bash/Get）：直接打印 raw_content
+    /// - 值输出命令（Read, Exec）：调用 print()
+    /// - Write：输出 "written {path} {size}"
+    fn print_command_output(&mut self, command: &Command, output: &CmdContent) {
+        match command {
+            Command::External { .. } => {
+                let text = output.raw_content.trim();
+                if !text.is_empty() {
+                    println!("{}", text);
+                }
+                // External 命令始终标记为有输出（Script 方法输出已直连终端）
+                self.had_output = true;
+            }
+            Command::Bash { .. } => {
+                let text = output.raw_content.trim();
+                if !text.is_empty() {
+                    use colored::Colorize;
+                    println!("{}", "Bash:".yellow());
+                    println!("{}", text);
+                    self.had_output = true;
+                }
+            }
+            Command::Read { .. } if output.is_print => {
+                output.print();
+                self.had_output = true;
+            }
+            Command::Read { .. } => {}
+            Command::Write { path, content, .. } => {
+                let size = content.as_ref().map(|c| c.len()).unwrap_or(0);
+                println!("written {} {}", path, size);
+                self.had_output = true;
+            }
+            Command::Exec { .. } => {
+                self.had_output = true;
+            }
+            _ => {}
+        }
     }
 
     /// 判断命令的输出类型是流输出还是值输出
@@ -480,6 +530,7 @@ impl Command {
         &self,
         engine: &mut Engine,
         mut internal: CmdContent,
+        registry: &mut CommandRegistry,
     ) -> Result<CmdContent, NcsError> {
         match self {
             Command::Open { mode, path, args } => {
@@ -664,6 +715,41 @@ impl Command {
 
                 Ok(internal)
             }
+            Command::Write {
+                mode,
+                path,
+                content,
+            } => {
+                crate::commands::write::execute(*mode, path, content.as_deref())?;
+                Ok(internal)
+            }
+            Command::Bash { command } => {
+                let content = crate::commands::bash::execute(command)?;
+                Ok(content)
+            }
+            Command::Exec { command } => {
+                crate::commands::exec::execute(command)?;
+                Ok(internal)
+            }
+            Command::Read { mode, path, .. } => {
+                let content = crate::commands::read::execute(*mode, path)?;
+                Ok(content)
+            }
+            Command::Include { path, args } => {
+                crate::commands::include::execute(path, args, registry, &engine.work_path)?;
+                Ok(internal)
+            }
+            Command::WorkPath { path } => {
+                let target = crate::commands::work_path::resolve(path)?;
+                std::env::set_current_dir(&target).map_err(|e| {
+                    NcsError::File(crate::error::FileError::WriteFailed {
+                        path: target.display().to_string(),
+                        reason: e.to_string(),
+                    })
+                })?;
+                engine.work_path = target;
+                Ok(internal)
+            }
             Command::Raw { .. } => Ok(internal),
             Command::Capture { pool_name } => {
                 // Capture: 从 last_result 取值存入 pools
@@ -684,6 +770,72 @@ impl Command {
                         feature: format!("Get pool '{}' not found", pool_name),
                     })
                 })?;
+                Ok(content)
+            }
+            Command::External {
+                name,
+                positional_args,
+            } => {
+                let entry = registry.find_command(name).ok_or_else(|| {
+                    NcsError::Registry(crate::error::RegistryError::CommandNotFound {
+                        cmd_name: name.clone(),
+                        line: crate::model::LineNumber::new(0),
+                        suggestion: None,
+                    })
+                })?;
+                let exec_path = entry
+                    .exec_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| name.clone());
+                let full_command = if positional_args.is_empty() {
+                    exec_path.clone()
+                } else {
+                    format!("{} {}", exec_path, positional_args.join(" "))
+                };
+
+                let content = match entry.exec_method {
+                    crate::registry::ExecMethod::Bash => {
+                        crate::commands::bash::execute(&full_command)?
+                    }
+                    crate::registry::ExecMethod::Script => {
+                        crate::commands::exec::execute(&full_command)?;
+                        crate::cmd_content::CmdContent::empty()
+                    }
+                    crate::registry::ExecMethod::Default => {
+                        // 直接进程执行
+                        let mut parts: Vec<&str> = exec_path.split_whitespace().collect();
+                        let prog = parts.remove(0);
+                        let mut cmd = std::process::Command::new(prog);
+                        for part in &parts {
+                            cmd.arg(part);
+                        }
+                        for arg in positional_args {
+                            cmd.arg(arg);
+                        }
+                        let output = cmd.output().map_err(|e| {
+                            NcsError::CommandExec(crate::error::CommandExecError::ExecutionFailed {
+                                command: full_command.clone(),
+                                exit_code: None,
+                                stderr: e.to_string(),
+                            })
+                        })?;
+                        if !output.status.success() {
+                            return Err(NcsError::CommandExec(
+                                crate::error::CommandExecError::ExecutionFailed {
+                                    command: full_command,
+                                    exit_code: output.status.code(),
+                                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                                },
+                            ));
+                        }
+                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                        let mut content = crate::cmd_content::CmdContent::from_raw_text(stdout);
+                        content.source_info =
+                            Some(crate::cmd_content::ContentSource::CommandOutput);
+                        content
+                    }
+                };
                 Ok(content)
             }
             _ => Err(NcsError::Engine(
@@ -758,6 +910,12 @@ impl Command {
                     CmdContent::empty()
                 }
             }
+            Command::Write { .. } => CmdContent::empty(),
+            Command::Exec { .. } => CmdContent::empty(),
+            Command::Read { .. } => result,
+            Command::Include { .. } => CmdContent::empty(),
+            Command::WorkPath { .. } => CmdContent::empty(),
+            Command::Bash { .. } => result,
             Command::Get { .. } => result,
             _ => result,
         }
@@ -767,7 +925,7 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{EngineError, NcsError};
+    use crate::error::NcsError;
 
     #[test]
     fn test_pop_exec_cmd_removes_only_matched_entry() {
@@ -842,17 +1000,15 @@ mod tests {
     }
 
     #[test]
-    fn test_unimplemented_command_returns_not_implemented_error() {
-        let mut engine = Engine::new();
+    fn test_all_builtin_commands_execute_without_not_implemented() {
+        // Phase 4 完成后，所有 12 个命令已接入 CmdContent 管道，
+        // execute() 不应再返回 NotImplemented 错误
+        let _engine = Engine::new();
         let registry = crate::registry::CommandRegistry::init();
-        let commands = vec![Command::Bash {
-            command: "echo hello".to_string(),
-        }];
-        let result = engine.execute(commands, &registry);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            NcsError::Engine(EngineError::NotImplemented { .. }) => {}
-            other => panic!("Expected NotImplemented error, got {:?}", other),
+        let cmd_names = ["BASH", "EXEC", "READ", "WRITE", "INCLUDE", "WORKPATH"];
+        for name in &cmd_names {
+            let entry = registry.find_command(name);
+            assert!(entry.is_some(), "Command {} should be registered", name);
         }
     }
 
@@ -924,7 +1080,7 @@ mod tests {
     #[test]
     fn test_capture_command_stores_into_pools() {
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
         // Phase 3: Capture 已融入 Close 管道语法，使用 Command::Capture 测试
         engine.last_result = Some(CommandResult {
             content: CmdContent::from_raw_text("captured data".to_string()),
@@ -933,7 +1089,7 @@ mod tests {
         let commands = vec![Command::Capture {
             pool_name: "my_pool2".to_string(),
         }];
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok());
         assert!(engine.pools.contains_key("my_pool2"));
     }
@@ -945,13 +1101,13 @@ mod tests {
     #[test]
     fn test_location_without_open_returns_owner_not_executed() {
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
         let commands = vec![Command::Location {
             mode: crate::parser::LocationMode::Normal,
             content: None,
             args: HashMap::new(),
         }];
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_err());
         match result.unwrap_err() {
             NcsError::Registry(crate::error::RegistryError::OwnerNotExecuted {
@@ -969,12 +1125,12 @@ mod tests {
     #[test]
     fn test_new_without_location_returns_owner_not_executed() {
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
         let commands = vec![Command::New {
             mode: crate::parser::NewMode::Normal,
             content: crate::model::NewContent { lines: vec![] },
         }];
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_err());
         match result.unwrap_err() {
             NcsError::Registry(crate::error::RegistryError::OwnerNotExecuted {
@@ -992,12 +1148,12 @@ mod tests {
     #[test]
     fn test_delete_without_location_returns_owner_not_executed() {
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
         let commands = vec![Command::Delete {
             mode: crate::parser::DeleteMode::Normal,
             content: None,
         }];
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_err());
         match result.unwrap_err() {
             NcsError::Registry(crate::error::RegistryError::OwnerNotExecuted { .. }) => {}
@@ -1012,7 +1168,7 @@ mod tests {
         std::fs::write(&path, "fn main() {\n    let x = 1;\n}\n").unwrap();
 
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         // Open
         let commands = vec![
@@ -1045,7 +1201,7 @@ mod tests {
             },
         ];
         engine.set_verbose(true);
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok(), "Expected success, got {:?}", result.err());
         assert!(engine.exec_cmds.iter().any(|ec| ec.cmd_name == "NEW"));
     }
@@ -1072,7 +1228,7 @@ mod tests {
     fn test_open_command_stores_result_in_last_result() {
         let (_dir, path) = make_temp_file("fn main() {\n    let x = 1;\n}\n");
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![Command::Open {
             mode: crate::parser::OpenMode::Normal,
@@ -1080,7 +1236,7 @@ mod tests {
             args: HashMap::new(),
         }];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok(), "Open should succeed");
 
         let last = engine
@@ -1099,7 +1255,7 @@ mod tests {
     fn test_location_command_stores_result_with_snapshot() {
         let (_dir, path) = make_temp_file("fn main() {\n    let x = 1;\n}\n");
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -1121,7 +1277,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok(), "Open+Location should succeed");
 
         let last = engine
@@ -1147,7 +1303,7 @@ mod tests {
     fn test_new_command_records_insert_change() {
         let (_dir, path) = make_temp_file("fn main() {\n    let x = 1;\n}\n");
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -1179,7 +1335,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok(), "Expected success, got {:?}", result.err());
 
         let last = engine
@@ -1206,7 +1362,7 @@ mod tests {
         let (_dir, path) =
             make_temp_file("fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n");
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -1237,7 +1393,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok(), "Expected success, got {:?}", result.err());
 
         let last = engine
@@ -1269,7 +1425,7 @@ mod tests {
         let (_dir, path) =
             make_temp_file("fn main() {\n    let old = 1;\n    println!(\"{}\", old);\n}\n");
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -1310,7 +1466,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(
             result.is_ok(),
             "BUG-204: New+Delete should succeed with snapshot matching, got {:?}",
@@ -1342,7 +1498,7 @@ mod tests {
     fn test_close_location_applies_changes_to_block() {
         let (_dir, path) = make_temp_file("fn main() {\n    let x = 1;\n}\n");
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -1378,7 +1534,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok(), "Expected success, got {:?}", result.err());
 
         // Changes should be applied and block_stack should be empty
@@ -1390,7 +1546,7 @@ mod tests {
     fn test_capture_stores_cmdcontent_in_pools() {
         let (_dir, path) = make_temp_file("fn main() {\n    let x = 1;\n}\n");
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![
             Command::Open {
@@ -1404,7 +1560,7 @@ mod tests {
             },
         ];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok());
         assert!(
             engine.pools.contains_key("my_capture"),
@@ -1420,7 +1576,7 @@ mod tests {
     #[test]
     fn test_get_reads_from_pools() {
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         // Pre-populate pools
         let mut content = CmdContent::from_raw_text("hello\nworld".to_string());
@@ -1433,7 +1589,7 @@ mod tests {
             like: None,
         }];
 
-        let result = engine.execute(commands, &registry);
+        let result = engine.execute(commands, &mut registry);
         assert!(result.is_ok(), "Get should succeed, got {:?}", result.err());
 
         let last = engine
@@ -1447,7 +1603,7 @@ mod tests {
     fn test_value_output_discards_last_result() {
         // Exec is ValueOutput - its result should not persist
         let mut engine = Engine::new();
-        let registry = crate::registry::CommandRegistry::init();
+        let mut registry = crate::registry::CommandRegistry::init();
 
         let commands = vec![Command::Exec {
             command: "echo test".to_string(),
@@ -1455,6 +1611,582 @@ mod tests {
 
         // Exec is not yet implemented; this test validates the output type logic
         // once Exec is implemented
-        let _result = engine.execute(commands, &registry);
+        let _result = engine.execute(commands, &mut registry);
+    }
+
+    // ============================================================
+    // Phase 4: Write 命令测试
+    // ============================================================
+
+    #[test]
+    fn test_write_normal_creates_file_with_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("output.txt");
+        let out_path_str = out_path.to_str().unwrap().to_string();
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Write {
+            mode: crate::parser::WriteMode::Normal,
+            path: out_path_str.clone(),
+            content: Some("hello from write".to_string()),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Write Normal should succeed, got {:?}",
+            result.err()
+        );
+
+        let file_content =
+            std::fs::read_to_string(&out_path_str).expect("output file should exist");
+        assert_eq!(file_content, "hello from write");
+    }
+
+    #[test]
+    fn test_write_normal_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("output.txt");
+        let out_path_str = out_path.to_str().unwrap().to_string();
+        std::fs::write(&out_path_str, "old content").unwrap();
+
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Write {
+            mode: crate::parser::WriteMode::Normal,
+            path: out_path_str.clone(),
+            content: Some("new content".to_string()),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Write should overwrite, got {:?}",
+            result.err()
+        );
+
+        let file_content = std::fs::read_to_string(&out_path_str).unwrap();
+        assert_eq!(file_content, "new content");
+    }
+
+    #[test]
+    fn test_write_raw_preserves_all_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("raw_output.txt");
+        let out_path_str = out_path.to_str().unwrap().to_string();
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Write {
+            mode: crate::parser::WriteMode::Raw,
+            path: out_path_str.clone(),
+            content: Some("!@Special tokens\n@/Close\nshould all be raw".to_string()),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Write Raw should succeed, got {:?}",
+            result.err()
+        );
+
+        let file_content = std::fs::read_to_string(&out_path_str).unwrap();
+        assert_eq!(file_content, "!@Special tokens\n@/Close\nshould all be raw");
+    }
+
+    #[test]
+    fn test_write_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested_path = dir.path().join("deeply/nested/dir/output.txt");
+        let nested_path_str = nested_path.to_str().unwrap().to_string();
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Write {
+            mode: crate::parser::WriteMode::Normal,
+            path: nested_path_str.clone(),
+            content: Some("deep content".to_string()),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Write with parent dirs should succeed, got {:?}",
+            result.err()
+        );
+
+        let file_content = std::fs::read_to_string(&nested_path_str).unwrap();
+        assert_eq!(file_content, "deep content");
+    }
+
+    // ============================================================
+    // Phase 4: Bash 命令测试
+    // ============================================================
+
+    #[test]
+    fn test_bash_executes_simple_echo() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Bash {
+            command: "echo hello_world".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Bash echo should succeed, got {:?}",
+            result.err()
+        );
+
+        let last = engine
+            .last_result
+            .as_ref()
+            .expect("Bash is stream output, last_result should be set");
+        assert!(
+            last.content.raw_content.contains("hello_world"),
+            "Bash output should contain 'hello_world', got: {}",
+            last.content.raw_content
+        );
+    }
+
+    #[test]
+    fn test_bash_security_denies_sudo() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Bash {
+            command: "sudo rm -rf /".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_err(), "sudo should be denied");
+        match result.unwrap_err() {
+            NcsError::CommandExec(crate::error::CommandExecError::SecurityDenied { .. }) => {}
+            other => panic!("Expected SecurityDenied, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bash_security_denies_chmod_777_root() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Bash {
+            command: "chmod 777 /etc/passwd".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_err(), "chmod 777 on root should be denied");
+    }
+
+    #[test]
+    fn test_bash_captures_failed_command_stderr() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Bash {
+            command: "nonexistent_command_xyz 2>&1".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_err(), "nonexistent command should fail");
+        match result.unwrap_err() {
+            NcsError::CommandExec(crate::error::CommandExecError::ExecutionFailed { .. }) => {}
+            other => panic!("Expected ExecutionFailed, got {:?}", other),
+        }
+    }
+
+    // ============================================================
+    // Phase 4: Exec 命令测试
+    // ============================================================
+
+    #[test]
+    fn test_exec_runs_command() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Exec {
+            command: "echo from_exec".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Exec should succeed, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_exec_is_value_output_discards_result() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Exec {
+            command: "echo transient".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_ok());
+        assert!(
+            engine.last_result.is_none(),
+            "Exec is value output, last_result should be None"
+        );
+    }
+
+    // ============================================================
+    // Phase 4: Read 命令测试
+    // ============================================================
+
+    #[test]
+    fn test_read_file_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("sample.txt");
+        let file_path_str = file_path.to_str().unwrap().to_string();
+        std::fs::write(&file_path_str, "line one\nline two\nline three").unwrap();
+
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Read {
+            mode: crate::parser::ReadMode::Normal,
+            path: file_path_str,
+            args: HashMap::new(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Read should succeed, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_read_nonexistent_file_returns_error() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Read {
+            mode: crate::parser::ReadMode::Normal,
+            path: "/nonexistent/file/path.txt".to_string(),
+            args: HashMap::new(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_err(), "Read of nonexistent file should fail");
+    }
+
+    // ============================================================
+    // Phase 4: Include 命令测试
+    // ============================================================
+
+    #[test]
+    fn test_include_registers_new_command() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let mut args = HashMap::new();
+        args.insert("alias".to_string(), "MyTool".to_string());
+
+        let commands = vec![Command::Include {
+            path: "/usr/bin/mytool".to_string(),
+            args,
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Include should succeed, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_include_alias_conflict_with_builtin_is_denied() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let mut args = HashMap::new();
+        args.insert("alias".to_string(), "Open".to_string());
+
+        let commands = vec![Command::Include {
+            path: "/usr/bin/tool".to_string(),
+            args,
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_err(),
+            "Include alias 'Open' should conflict with builtin"
+        );
+    }
+
+    // ============================================================
+    // Phase 4: WorkPath 命令测试
+    // ============================================================
+
+    #[test]
+    fn test_work_path_changes_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap().to_string();
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::WorkPath {
+            path: dir_path.clone(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "WorkPath should succeed, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_work_path_nonexistent_directory_fails() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::WorkPath {
+            path: "/nonexistent/directory/path".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_err(), "WorkPath to nonexistent dir should fail");
+    }
+
+    // ============================================================
+    // Issue #1/#2: Bash/Read/Write 终端输出 + had_output
+    // ============================================================
+
+    #[test]
+    fn test_bash_sets_had_output() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Bash {
+            command: "echo test_output".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_ok());
+        assert!(engine.had_output, "Bash should set had_output to true");
+    }
+
+    #[test]
+    fn test_read_sets_had_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("sample.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Read {
+            mode: crate::parser::ReadMode::Normal,
+            path: file_path.to_str().unwrap().to_string(),
+            args: HashMap::new(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_ok());
+        assert!(engine.had_output, "Read should set had_output to true");
+    }
+
+    #[test]
+    fn test_write_sets_had_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("output.txt");
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Write {
+            mode: crate::parser::WriteMode::Normal,
+            path: out_path.to_str().unwrap().to_string(),
+            content: Some("write content".to_string()),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_ok());
+        assert!(engine.had_output, "Write should set had_output to true");
+    }
+
+    #[test]
+    fn test_exec_sets_had_output() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::Exec {
+            command: "echo exec_output".to_string(),
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_ok());
+        assert!(engine.had_output, "Exec should set had_output to true");
+    }
+
+    #[test]
+    fn test_had_output_starts_false() {
+        let engine = Engine::new();
+        assert!(!engine.had_output, "had_output should start false");
+    }
+
+    #[test]
+    fn test_file_edit_without_additions_does_not_set_had_output() {
+        // Pure read-only Location should not set had_output
+        let (_dir, path) = make_temp_file("fn main() {\n    let x = 1;\n}\n");
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![
+            Command::Open {
+                mode: crate::parser::OpenMode::Normal,
+                path,
+                args: HashMap::new(),
+            },
+            Command::Location {
+                mode: crate::parser::LocationMode::Normal,
+                content: Some(crate::model::LocationContent {
+                    lines: vec![crate::model::LocationLine {
+                        index: 0,
+                        diff_taps: Some(0),
+                        content: "fn main() {".to_string(),
+                        line_num: None,
+                    }],
+                }),
+                args: HashMap::new(),
+            },
+            Command::Close {
+                name: "Open".to_string(),
+                capture: None,
+            },
+        ];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_ok());
+        // Read-only operations don't produce output
+        // (Location result is triggered by verbose, not by had_output)
+    }
+
+    // ============================================================
+    // Include → External 端到端测试
+    // ============================================================
+
+    #[test]
+    fn test_include_then_external_via_bash() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let mut args = HashMap::new();
+        args.insert("alias".to_string(), "EchoTool".to_string());
+        args.insert("exec".to_string(), "bash".to_string());
+
+        let commands = vec![
+            Command::Include {
+                path: "echo".to_string(),
+                args,
+            },
+            Command::External {
+                name: "EchoTool".to_string(),
+                positional_args: vec!["hello_from_external".to_string()],
+            },
+        ];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Include+External via bash should succeed, got {:?}",
+            result.err()
+        );
+        assert!(engine.had_output);
+        assert!(registry.find_command("EchoTool").is_some());
+    }
+
+    #[test]
+    fn test_include_then_external_via_script() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let mut args = HashMap::new();
+        args.insert("alias".to_string(), "EchoScr".to_string());
+        args.insert("exec".to_string(), "script".to_string());
+
+        let commands = vec![
+            Command::Include {
+                path: "echo".to_string(),
+                args,
+            },
+            Command::External {
+                name: "EchoScr".to_string(),
+                positional_args: vec!["hello_from_script".to_string()],
+            },
+        ];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Include+External via script should succeed, got {:?}",
+            result.err()
+        );
+        assert!(engine.had_output);
+    }
+
+    #[test]
+    fn test_include_resolves_dot_slash_path() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        // 设置 work_path 为固定值用于测试
+        engine.work_path = std::path::PathBuf::from("/tmp");
+
+        let mut args = HashMap::new();
+        args.insert("alias".to_string(), "ResolvedCmd".to_string());
+        args.insert("exec".to_string(), "bash".to_string());
+
+        let commands = vec![Command::Include {
+            path: "echo ./my_script.sh".to_string(),
+            args,
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(
+            result.is_ok(),
+            "Include should succeed, got {:?}",
+            result.err()
+        );
+
+        let entry = registry.find_command("ResolvedCmd").unwrap();
+        let ep = entry.exec_path.as_ref().unwrap().to_string_lossy();
+        // echo 是系统命令，不应被展开；./my_script.sh 应该被展开
+        assert!(ep.starts_with("echo /"));
+        assert!(ep.contains("my_script.sh"));
+    }
+
+    #[test]
+    fn test_external_command_not_registered_errors() {
+        let mut engine = Engine::new();
+        let mut registry = crate::registry::CommandRegistry::init();
+
+        let commands = vec![Command::External {
+            name: "NoSuchCmd".to_string(),
+            positional_args: vec![],
+        }];
+
+        let result = engine.execute(commands, &mut registry);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NcsError::Registry(crate::error::RegistryError::CommandNotFound {
+                cmd_name, ..
+            }) => {
+                assert_eq!(cmd_name, "NoSuchCmd");
+            }
+            other => panic!("Expected CommandNotFound, got {:?}", other),
+        }
     }
 }
