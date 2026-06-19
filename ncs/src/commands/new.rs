@@ -168,6 +168,7 @@ mod tests {
     /// 辅助：构建 NewContent
     fn make_new_content(lines: &[(&str, usize, bool)]) -> NewContent {
         NewContent {
+            base_taps: 0,
             lines: lines
                 .iter()
                 .map(|(content, diff_taps, is_raw)| NewLine {

@@ -464,6 +464,7 @@ mod tests {
             Command::New {
                 mode: crate::parser::NewMode::Normal,
                 content: crate::model::NewContent {
+                    base_taps: 0,
                     lines: vec![crate::model::NewLine {
                         diff_taps: 4,
                         content: "let inserted = 42;".to_string(),
@@ -534,6 +535,7 @@ mod tests {
             Command::New {
                 mode: crate::parser::NewMode::Normal,
                 content: crate::model::NewContent {
+                    base_taps: 0,
                     lines: vec![crate::model::NewLine {
                         diff_taps: 4,
                         content: "let x = 0;".to_string(),
@@ -544,6 +546,7 @@ mod tests {
             Command::New {
                 mode: crate::parser::NewMode::Normal,
                 content: crate::model::NewContent {
+                    base_taps: 0,
                     lines: vec![crate::model::NewLine {
                         diff_taps: 4,
                         content: "let y = 0;".to_string(),

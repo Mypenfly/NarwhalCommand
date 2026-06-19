@@ -24,13 +24,14 @@
 //!
 //! 从 n_edit/src/engine.rs 拆分重构。
 
+pub mod command_pipeline;
 pub mod executor;
 
 use crate::cmd_content::{CmdContent, CommandResult};
 use crate::error::NcsError;
 use crate::model::{ContentBlock, FileContent, SearchScope};
 use crate::output::DiffLine;
-use crate::parser::{Command, DeleteMode, NewMode};
+use crate::parser::Command;
 use crate::registry::{normalize_command_name, CommandRegistry};
 use std::collections::HashMap;
 
@@ -78,6 +79,12 @@ pub struct Engine {
     // ========== Phase 3 新增字段 ==========
     /// 上一条命令的执行结果（供 Capture 捕获 + 下一命令输入）
     pub last_result: Option<CommandResult>,
+
+    // ========== Phase 4 新增字段 ==========
+    /// 当前 Open 是否为 Dir 模式（决定写回时用目录反序列化逻辑）
+    pub is_dir_mode: bool,
+    /// Dir 模式下的原始树形文本快照（用于退出时比较变更）
+    pub dir_snapshot: Option<String>,
 }
 
 impl Engine {
@@ -95,6 +102,8 @@ impl Engine {
             had_output: false,
             work_path: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             last_result: None,
+            is_dir_mode: false,
+            dir_snapshot: None,
         }
     }
 
@@ -406,10 +415,73 @@ impl Engine {
             }
         }
 
-        if let (Some(ref file), Some(ref path)) = (&self.file, &self.file_path) {
+        if self.is_dir_mode {
+            self.write_back_dir()?;
+        } else if let (Some(ref file), Some(ref path)) = (&self.file, &self.file_path) {
             file.write_back(path)?;
         }
 
+        Ok(())
+    }
+
+    /// Dir 模式写回：比较原始树和最终树，创建/删除文件和目录
+    fn write_back_dir(&mut self) -> Result<(), NcsError> {
+        let snapshot = self.dir_snapshot.take().unwrap_or_default();
+        let final_text: String = if let Some(ref file) = self.file {
+            file.lines
+                .iter()
+                .map(|l| l.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
+
+        let base_path = self.file_path.as_deref().unwrap_or(".");
+        let resolved = self.work_path.join(base_path);
+
+        let original_entries =
+            crate::commands::open::deserialize_tree(&snapshot, &resolved.to_string_lossy());
+        let final_entries =
+            crate::commands::open::deserialize_tree(&final_text, &resolved.to_string_lossy());
+
+        // 删除：在原始但不在最终
+        for entry in &original_entries {
+            if !final_entries
+                .iter()
+                .any(|e| e.relative_path == entry.relative_path)
+            {
+                let abs = resolved.join(&entry.relative_path);
+                if entry.is_dir {
+                    let _ = std::fs::remove_dir_all(&abs);
+                } else {
+                    let _ = std::fs::remove_file(&abs);
+                }
+            }
+        }
+
+        // 创建：在最终但不在原始
+        for entry in &final_entries {
+            if !original_entries
+                .iter()
+                .any(|e| e.relative_path == entry.relative_path)
+            {
+                let abs = resolved.join(&entry.relative_path);
+                if entry.is_dir {
+                    let _ = std::fs::create_dir_all(&abs);
+                } else {
+                    if let Some(parent) = abs.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&abs, "");
+                }
+            }
+        }
+
+        self.is_dir_mode = false;
+        self.dir_snapshot = None;
+        self.file = None;
+        self.file_path = None;
         Ok(())
     }
 
@@ -513,412 +585,6 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ============================================================
-// Phase 3: Command 三步流水线（execute_core / out）
-// ============================================================
-
-impl Command {
-    /// 第二阶段：执行核心逻辑
-    ///
-    /// 从 `internal` 读取 convert 阶段准备的 pending 数据，
-    /// 执行实际操作（文件读写、匹配定位、变更记录），
-    /// 引擎状态变更通过 `engine` 传递。
-    pub fn execute_core(
-        &self,
-        engine: &mut Engine,
-        mut internal: CmdContent,
-        registry: &mut CommandRegistry,
-    ) -> Result<CmdContent, NcsError> {
-        match self {
-            Command::Open { mode, path, args } => {
-                crate::commands::open::execute(engine, *mode, path, args)?;
-                Ok(internal)
-            }
-            Command::Location {
-                mode,
-                content,
-                args,
-            } => {
-                crate::commands::location::execute(engine, *mode, content.clone(), args)?;
-                Ok(internal)
-            }
-            Command::New { mode, content: _ } => {
-                // 从 pending 读取 convert 阶段转换的行列表
-                let new_lines = internal.pending_new_lines.take().ok_or_else(|| {
-                    NcsError::Engine(crate::error::EngineError::NotImplemented {
-                        feature: "New execute_core: missing pending_new_lines".to_string(),
-                    })
-                })?;
-
-                match *mode {
-                    NewMode::Start => {
-                        // Start: 直接在文件级别插入开头（桥接模式，直接修改 engine.file）
-                        let file = engine.file.as_mut().ok_or(NcsError::File(
-                            crate::error::FileError::NotFound {
-                                path: "(no file opened)".to_string(),
-                            },
-                        ))?;
-                        let insert_pos = 0;
-                        let new_line_count = new_lines.len();
-                        let tail = std::mem::take(&mut file.lines);
-                        let mut combined: Vec<crate::model::Line> = new_lines
-                            .iter()
-                            .map(|cl| crate::model::Line {
-                                line_num: crate::model::LineNumber::new(0),
-                                taps: crate::model::count_leading_spaces(&cl.content),
-                                diff_taps: 0,
-                                content: cl.content.clone(),
-                                stripped_content: crate::model::stripped_content(&cl.content),
-                            })
-                            .collect();
-                        combined.extend(tail);
-                        file.lines = combined;
-                        executor::reindex_file(file);
-
-                        let added_entries =
-                            executor::collect_new_file_line_info(file, insert_pos, new_line_count);
-                        engine.record_added_lines(added_entries);
-                    }
-                    NewMode::End => {
-                        // End: 直接在文件级别插入末尾（桥接模式，直接修改 engine.file）
-                        let file = engine.file.as_mut().ok_or(NcsError::File(
-                            crate::error::FileError::NotFound {
-                                path: "(no file opened)".to_string(),
-                            },
-                        ))?;
-                        let insert_start = file.lines.len();
-                        let new_line_count = new_lines.len();
-                        let new_file_lines: Vec<crate::model::Line> = new_lines
-                            .iter()
-                            .map(|cl| crate::model::Line {
-                                line_num: crate::model::LineNumber::new(0),
-                                taps: crate::model::count_leading_spaces(&cl.content),
-                                diff_taps: 0,
-                                content: cl.content.clone(),
-                                stripped_content: crate::model::stripped_content(&cl.content),
-                            })
-                            .collect();
-                        file.lines.extend(new_file_lines);
-                        executor::reindex_file(file);
-
-                        let added_entries = executor::collect_new_file_line_info(
-                            file,
-                            insert_start,
-                            new_line_count,
-                        );
-                        engine.record_added_lines(added_entries);
-                    }
-                    NewMode::Normal => {
-                        // Normal: 在 Location 匹配位置之后插入（变更追踪模式）
-                        let insert_pos = engine
-                            .block_stack
-                            .last()
-                            .map(|b| match &b.match_info {
-                                crate::model::MatchInfo::Location { matched_line_count } => {
-                                    *matched_line_count
-                                }
-                                crate::model::MatchInfo::DeleteAt { position } => *position,
-                                crate::model::MatchInfo::Empty => b.lines.len(),
-                            })
-                            .unwrap_or(0);
-
-                        let after_line = insert_pos.saturating_sub(1);
-
-                        // Diff: 从原始 block 收集上下文 + 新行内容
-                        if let Some(block) = engine.block_stack.last() {
-                            let actual_insert = insert_pos.min(block.lines.len());
-                            let context_above =
-                                executor::collect_block_context_above(block, actual_insert);
-                            let context_below = executor::collect_block_context_below(
-                                block,
-                                actual_insert.saturating_sub(1),
-                            );
-                            let changed: Vec<DiffLine> = new_lines
-                                .iter()
-                                .enumerate()
-                                .map(|(i, l)| DiffLine {
-                                    kind: crate::output::DiffLineKind::Added,
-                                    line_number: Some(crate::model::LineNumber::new(
-                                        block.start_line.to_usize() + actual_insert + i,
-                                    )),
-                                    content: l.content.clone(),
-                                })
-                                .collect();
-                            engine.record_diff_with_context(changed, context_above, context_below);
-                        }
-
-                        internal.record_insert(after_line, new_lines, "NEW");
-                    }
-                }
-
-                Ok(internal)
-            }
-            Command::Delete {
-                mode,
-                content: del_content,
-            } => {
-                match mode {
-                    DeleteMode::Block => {
-                        let total = internal.snapshot_lines.len();
-                        let block = engine.block_stack.last().ok_or(NcsError::Engine(
-                            crate::error::EngineError::MissingLocationForNew,
-                        ))?;
-                        let (changed, context_above, context_below) =
-                            executor::collect_deleted_diff_data(block, 0, total.saturating_sub(1));
-                        internal.record_delete(0, total.saturating_sub(1), "DELETE");
-                        engine.record_diff_with_context(changed, context_above, context_below);
-                    }
-                    DeleteMode::Normal => {
-                        let del_content = del_content.as_ref().ok_or(NcsError::Engine(
-                            crate::error::EngineError::MissingLocationForNew,
-                        ))?;
-
-                        // 在 snapshot 中匹配
-                        let (s, e) = executor::find_delete_match_in_snapshot(
-                            &internal.snapshot_lines,
-                            del_content,
-                        )
-                        .ok_or_else(|| {
-                            executor::delete_not_found_in_snapshot_error(
-                                del_content,
-                                &internal.snapshot_lines,
-                            )
-                        })?;
-
-                        // 邻接检查
-                        let block = engine.block_stack.last().ok_or(NcsError::Engine(
-                            crate::error::EngineError::MissingLocationForNew,
-                        ))?;
-                        let matched_line_count = match &block.match_info {
-                            crate::model::MatchInfo::Location { matched_line_count } => {
-                                *matched_line_count
-                            }
-                            _ => 0,
-                        };
-                        executor::check_delete_adjacency_in_snapshot(
-                            &internal.snapshot_lines,
-                            matched_line_count,
-                            s,
-                        )?;
-
-                        // Diff 收集
-                        let (changed, context_above, context_below) =
-                            executor::collect_deleted_diff_data(block, s, e);
-                        engine.record_diff_with_context(changed, context_above, context_below);
-
-                        internal.record_delete(s, e, "DELETE");
-                    }
-                }
-
-                Ok(internal)
-            }
-            Command::Write {
-                mode,
-                path,
-                content,
-            } => {
-                crate::commands::write::execute(*mode, path, content.as_deref())?;
-                Ok(internal)
-            }
-            Command::Bash { command } => {
-                let content = crate::commands::bash::execute(command)?;
-                Ok(content)
-            }
-            Command::Exec { command } => {
-                crate::commands::exec::execute(command)?;
-                Ok(internal)
-            }
-            Command::Read { mode, path, .. } => {
-                let content = crate::commands::read::execute(*mode, path)?;
-                Ok(content)
-            }
-            Command::Include { path, args } => {
-                crate::commands::include::execute(path, args, registry, &engine.work_path)?;
-                Ok(internal)
-            }
-            Command::WorkPath { path } => {
-                let target = crate::commands::work_path::resolve(path)?;
-                std::env::set_current_dir(&target).map_err(|e| {
-                    NcsError::File(crate::error::FileError::WriteFailed {
-                        path: target.display().to_string(),
-                        reason: e.to_string(),
-                    })
-                })?;
-                engine.work_path = target;
-                Ok(internal)
-            }
-            Command::Raw { .. } => Ok(internal),
-            Command::Capture { pool_name } => {
-                // Capture: 从 last_result 取值存入 pools
-                let content = engine
-                    .last_result
-                    .take()
-                    .map(|r| r.content)
-                    .unwrap_or_default();
-                engine.pools.insert(pool_name.clone(), content);
-                Ok(internal)
-            }
-            Command::Get {
-                pool_name,
-                like: _like,
-            } => {
-                let content = engine.pools.get(pool_name).cloned().ok_or_else(|| {
-                    NcsError::Engine(crate::error::EngineError::NotImplemented {
-                        feature: format!("Get pool '{}' not found", pool_name),
-                    })
-                })?;
-                Ok(content)
-            }
-            Command::External {
-                name,
-                positional_args,
-            } => {
-                let entry = registry.find_command(name).ok_or_else(|| {
-                    NcsError::Registry(crate::error::RegistryError::CommandNotFound {
-                        cmd_name: name.clone(),
-                        line: crate::model::LineNumber::new(0),
-                        suggestion: None,
-                    })
-                })?;
-                let exec_path = entry
-                    .exec_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| name.clone());
-                let full_command = if positional_args.is_empty() {
-                    exec_path.clone()
-                } else {
-                    format!("{} {}", exec_path, positional_args.join(" "))
-                };
-
-                let content = match entry.exec_method {
-                    crate::registry::ExecMethod::Bash => {
-                        crate::commands::bash::execute(&full_command)?
-                    }
-                    crate::registry::ExecMethod::Script => {
-                        crate::commands::exec::execute(&full_command)?;
-                        crate::cmd_content::CmdContent::empty()
-                    }
-                    crate::registry::ExecMethod::Default => {
-                        // 直接进程执行
-                        let mut parts: Vec<&str> = exec_path.split_whitespace().collect();
-                        let prog = parts.remove(0);
-                        let mut cmd = std::process::Command::new(prog);
-                        for part in &parts {
-                            cmd.arg(part);
-                        }
-                        for arg in positional_args {
-                            cmd.arg(arg);
-                        }
-                        let output = cmd.output().map_err(|e| {
-                            NcsError::CommandExec(crate::error::CommandExecError::ExecutionFailed {
-                                command: full_command.clone(),
-                                exit_code: None,
-                                stderr: e.to_string(),
-                            })
-                        })?;
-                        if !output.status.success() {
-                            return Err(NcsError::CommandExec(
-                                crate::error::CommandExecError::ExecutionFailed {
-                                    command: full_command,
-                                    exit_code: output.status.code(),
-                                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                                },
-                            ));
-                        }
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let mut content = crate::cmd_content::CmdContent::from_raw_text(stdout);
-                        content.source_info =
-                            Some(crate::cmd_content::ContentSource::CommandOutput);
-                        content
-                    }
-                };
-                Ok(content)
-            }
-            _ => Err(NcsError::Engine(
-                crate::error::EngineError::NotImplemented {
-                    feature: self.cmd_name(),
-                },
-            )),
-        }
-    }
-
-    /// 第三阶段：将 execute_core 的结果格式化为下游可用的 CmdContent
-    ///
-    /// Open/Location 从 engine 状态构建带快照的 CmdContent，
-    /// New/Delete 直接透传 (changes 已在 execute_core 中记录)。
-    pub fn out(&self, result: CmdContent, engine: &Engine) -> CmdContent {
-        match self {
-            Command::Open { .. } => {
-                if let Some(ref file) = engine.file {
-                    let cmd_lines: Vec<crate::cmd_content::CmdLine> = file
-                        .lines
-                        .iter()
-                        .map(|l| crate::cmd_content::CmdLine {
-                            line_num: l.line_num.to_usize(),
-                            content: l.content.clone(),
-                        })
-                        .collect();
-                    let raw = cmd_lines
-                        .iter()
-                        .map(|l| &l.content)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let mut c = CmdContent::empty();
-                    c.snapshot_lines = cmd_lines.clone();
-                    c.snapshot_raw = raw.clone();
-                    c.lines = cmd_lines;
-                    c.raw_content = raw;
-                    c.source_info = Some(crate::cmd_content::ContentSource::File {
-                        file_path: engine.file_path.clone().unwrap_or_default(),
-                    });
-                    c
-                } else {
-                    CmdContent::empty()
-                }
-            }
-            Command::Location { .. } => {
-                if let Some(block) = engine.block_stack.last() {
-                    let block_index = engine.block_stack.len() - 1;
-                    let cmd_lines: Vec<crate::cmd_content::CmdLine> = block
-                        .lines
-                        .iter()
-                        .map(|l| crate::cmd_content::CmdLine {
-                            line_num: l.line_num.to_usize(),
-                            content: l.content.clone(),
-                        })
-                        .collect();
-                    let raw = cmd_lines
-                        .iter()
-                        .map(|l| &l.content)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let mut c = CmdContent::empty();
-                    c.snapshot_lines = cmd_lines.clone();
-                    c.snapshot_raw = raw.clone();
-                    c.lines = cmd_lines;
-                    c.raw_content = raw;
-                    c.source_info = Some(crate::cmd_content::ContentSource::Block { block_index });
-                    c.is_print = true;
-                    c
-                } else {
-                    CmdContent::empty()
-                }
-            }
-            Command::Write { .. } => CmdContent::empty(),
-            Command::Exec { .. } => CmdContent::empty(),
-            Command::Read { .. } => result,
-            Command::Include { .. } => CmdContent::empty(),
-            Command::WorkPath { .. } => CmdContent::empty(),
-            Command::Bash { .. } => result,
-            Command::Get { .. } => result,
-            _ => result,
-        }
     }
 }
 
@@ -1128,7 +794,10 @@ mod tests {
         let mut registry = crate::registry::CommandRegistry::init();
         let commands = vec![Command::New {
             mode: crate::parser::NewMode::Normal,
-            content: crate::model::NewContent { lines: vec![] },
+            content: crate::model::NewContent {
+                lines: vec![],
+                base_taps: 0,
+            },
         }];
         let result = engine.execute(commands, &mut registry);
         assert!(result.is_err());
@@ -1192,6 +861,7 @@ mod tests {
             Command::New {
                 mode: crate::parser::NewMode::Normal,
                 content: crate::model::NewContent {
+                    base_taps: 0,
                     lines: vec![crate::model::NewLine {
                         diff_taps: 4,
                         content: "let y = 2;".to_string(),
@@ -1326,6 +996,7 @@ mod tests {
             Command::New {
                 mode: crate::parser::NewMode::Normal,
                 content: crate::model::NewContent {
+                    base_taps: 0,
                     lines: vec![crate::model::NewLine {
                         diff_taps: 4,
                         content: "let y = 2;".to_string(),
@@ -1448,6 +1119,7 @@ mod tests {
             Command::New {
                 mode: crate::parser::NewMode::Normal,
                 content: crate::model::NewContent {
+                    base_taps: 0,
                     lines: vec![crate::model::NewLine {
                         diff_taps: 4,
                         content: "let inserted = 42;".to_string(),
@@ -1521,6 +1193,7 @@ mod tests {
             Command::New {
                 mode: crate::parser::NewMode::Normal,
                 content: crate::model::NewContent {
+                    base_taps: 0,
                     lines: vec![crate::model::NewLine {
                         diff_taps: 4,
                         content: "let y = 2;".to_string(),
@@ -2188,5 +1861,97 @@ mod tests {
             }
             other => panic!("Expected CommandNotFound, got {:?}", other),
         }
+    }
+
+    // ============================================================
+    // Open Dir 模式测试
+    // ============================================================
+
+    #[test]
+    fn test_open_dir_produces_tree_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("c.py"), "").unwrap();
+
+        let mut engine = Engine::new();
+        engine.work_path = dir.path().to_path_buf();
+
+        let commands = vec![Command::Open {
+            mode: crate::parser::OpenMode::Dir,
+            path: dir.path().to_string_lossy().to_string(),
+            args: std::collections::HashMap::new(),
+        }];
+
+        let mut registry = CommandRegistry::init();
+        // 隐式关闭会清理 dir 状态，但执行不应报错
+        engine.execute(commands, &mut registry).unwrap();
+        // 执行成功即通过
+    }
+
+    #[test]
+    fn test_open_dir_with_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("deep.rs"), "").unwrap();
+        std::fs::write(dir.path().join("top.txt"), "").unwrap();
+
+        let mut engine = Engine::new();
+        engine.work_path = dir.path().to_path_buf();
+        let mut args = std::collections::HashMap::new();
+        args.insert("depth".to_string(), "1".to_string());
+
+        let commands = vec![Command::Open {
+            mode: crate::parser::OpenMode::Dir,
+            path: ".".to_string(),
+            args,
+        }];
+
+        let mut registry = CommandRegistry::init();
+        engine.execute(commands, &mut registry).unwrap();
+        // depth=1: deep.rs should not be in tree and thus not deleted
+        assert!(
+            sub.join("deep.rs").exists(),
+            "deep.rs should survive depth=1"
+        );
+        assert!(dir.path().join("top.txt").exists());
+        assert!(sub.exists());
+    }
+
+    #[test]
+    fn test_open_dir_close_writes_back_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("existing.rs"), "").unwrap();
+
+        let dir_name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let mut engine = Engine::new();
+        engine.work_path = dir.path().parent().unwrap().to_path_buf();
+
+        let commands = vec![
+            Command::Open {
+                mode: crate::parser::OpenMode::Dir,
+                path: dir_name.clone(),
+                args: std::collections::HashMap::new(),
+            },
+            Command::Close {
+                name: "Open".to_string(),
+                capture: None,
+            },
+        ];
+
+        let mut registry = CommandRegistry::init();
+        engine.execute(commands, &mut registry).unwrap();
+
+        // 验证写回后目录仍在且 is_dir_mode 已清除
+        assert!(!engine.is_dir_mode);
+        assert!(dir.path().join("existing.rs").exists());
     }
 }

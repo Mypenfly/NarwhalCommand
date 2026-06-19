@@ -76,15 +76,201 @@ fn execute_normal(
 }
 
 fn execute_dir(
-    _engine: &mut Engine,
-    _path: &str,
-    _args: &std::collections::HashMap<String, String>,
+    engine: &mut Engine,
+    path: &str,
+    args: &std::collections::HashMap<String, String>,
 ) -> Result<(), NcsError> {
-    Err(NcsError::Engine(
-        crate::error::EngineError::NotImplemented {
-            feature: "Open Dir 模式".to_string(),
-        },
-    ))
+    let resolved = engine.work_path.join(path);
+    if !resolved.is_dir() {
+        return Err(NcsError::File(crate::error::FileError::NotFound {
+            path: path.to_string(),
+        }));
+    }
+    let depth: usize = args.get("depth").and_then(|s| s.parse().ok()).unwrap_or(3);
+    let ignore_patterns: Vec<&str> = args
+        .get("ignore")
+        .map(|s| s.split(',').map(|p| p.trim()).collect())
+        .unwrap_or_else(|| vec!["*.bin"]);
+    let filter_patterns: Vec<&str> = args
+        .get("filter")
+        .map(|s| s.split(',').map(|p| p.trim()).collect())
+        .unwrap_or_default();
+
+    let tree = serialize_dir(&resolved, depth, &ignore_patterns, &filter_patterns);
+    let file_content = crate::model::FileContent::from_text(&tree);
+    engine.file_path = Some(path.to_string());
+    engine.file = Some(file_content);
+    engine.is_dir_mode = true;
+    engine.dir_snapshot = Some(tree);
+    Ok(())
+}
+
+/// 将目录结构序列化为树形文本
+///
+/// 格式:
+/// dirname:
+///   file1.rs
+///   subdir:
+///     file3.py
+fn serialize_dir(
+    dir_path: &std::path::Path,
+    depth: usize,
+    ignore_patterns: &[&str],
+    filter_patterns: &[&str],
+) -> String {
+    let mut output = String::new();
+    let root_name = dir_name(dir_path);
+    output.push_str(&format!("{}:\n", root_name));
+    serialize_dir_entries(
+        dir_path,
+        depth - 1,
+        ignore_patterns,
+        filter_patterns,
+        1,
+        &mut output,
+    );
+    output
+}
+
+fn serialize_dir_entries(
+    dir_path: &std::path::Path,
+    remaining_depth: usize,
+    ignore_patterns: &[&str],
+    filter_patterns: &[&str],
+    indent_level: usize,
+    output: &mut String,
+) {
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir_path) {
+        Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+        Err(_) => return,
+    };
+    entries.sort();
+
+    let indent = "  ".repeat(indent_level);
+
+    for entry in entries {
+        let name = dir_name(&entry);
+        let is_dir = entry.is_dir();
+
+        if matches_any_pattern(&name, ignore_patterns) {
+            continue;
+        }
+        if !filter_patterns.is_empty() && !is_dir && !matches_any_pattern(&name, filter_patterns) {
+            continue;
+        }
+
+        if is_dir {
+            output.push_str(&format!("{}{}:\n", indent, name));
+            if remaining_depth > 0 {
+                serialize_dir_entries(
+                    &entry,
+                    remaining_depth - 1,
+                    ignore_patterns,
+                    filter_patterns,
+                    indent_level + 1,
+                    output,
+                );
+            }
+        } else {
+            output.push_str(&format!("{}{}\n", indent, name));
+        }
+    }
+}
+
+/// 简单通配符匹配（仅支持 * 和 ?）
+fn matches_any_pattern(name: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|p| simple_glob_match(p, name))
+}
+
+fn simple_glob_match(pattern: &str, name: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    let name_chars: Vec<char> = name.chars().collect();
+    glob_match_impl(&chars, &name_chars, 0, 0)
+}
+
+fn glob_match_impl(pat: &[char], name: &[char], pi: usize, ni: usize) -> bool {
+    if pi == pat.len() {
+        return ni == name.len();
+    }
+    match pat[pi] {
+        '*' => {
+            // * matches zero or more characters
+            for skip in 0..=name.len().saturating_sub(ni) {
+                if glob_match_impl(pat, name, pi + 1, ni + skip) {
+                    return true;
+                }
+            }
+            false
+        }
+        '?' => ni < name.len() && glob_match_impl(pat, name, pi + 1, ni + 1),
+        c => ni < name.len() && name[ni] == c && glob_match_impl(pat, name, pi + 1, ni + 1),
+    }
+}
+
+/// 树形条目（反序列化结果）
+#[derive(Debug, Clone, PartialEq)]
+pub struct TreeEntry {
+    pub relative_path: String,
+    pub is_dir: bool,
+}
+
+/// 将树形文本反序列化为条目列表
+///
+/// 每个条目包含相对于 root 的路径和是否目录。
+/// 根条目（缩进=0 的 `dirname:`）代表 root 本身，其相对路径为空串。
+pub fn deserialize_tree(tree: &str, _root: &str) -> Vec<TreeEntry> {
+    let mut entries = Vec::new();
+    let mut path_stack: Vec<String> = Vec::new();
+    let mut is_first = true;
+
+    for line in tree.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let indent = count_indent(line);
+        let name = line.trim().trim_end_matches(':').to_string();
+        let is_dir = line.trim().ends_with(':');
+
+        // 跳过根条目（它代表 root 本身，不加入路径栈）
+        if is_first {
+            is_first = false;
+            continue;
+        }
+
+        while path_stack.len() > indent {
+            path_stack.pop();
+        }
+
+        let relative = if path_stack.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", path_stack.join("/"), name)
+        };
+
+        entries.push(TreeEntry {
+            relative_path: relative.clone(),
+            is_dir,
+        });
+
+        if is_dir {
+            path_stack.push(name);
+        }
+    }
+
+    entries
+}
+
+/// 计算行的缩进级别（每 2 空格 = 1 级）
+fn count_indent(line: &str) -> usize {
+    let spaces = line.chars().take_while(|c| *c == ' ').count();
+    spaces / 2
+}
+
+/// 获取路径的最后一个组件名
+fn dir_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -205,13 +391,98 @@ mod tests {
     }
 
     #[test]
-    fn test_open_dir_returns_not_implemented() {
-        let mut engine = Engine::new();
-        let result = execute(&mut engine, OpenMode::Dir, "./some_dir", &HashMap::new());
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            NcsError::Engine(crate::error::EngineError::NotImplemented { .. }) => {}
-            other => panic!("Expected NotImplemented error, got {:?}", other),
-        }
+    fn test_serialize_dir_flat() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "").unwrap();
+        let tree = serialize_dir(dir.path(), 1, &["*.bin"], &[]);
+        let expected = format!("{}:\n  a.txt\n  b.rs\n", dir_name(dir.path()));
+        assert_eq!(tree, expected);
+    }
+
+    #[test]
+    fn test_serialize_dir_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("c.py"), "").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "").unwrap();
+        let tree = serialize_dir(dir.path(), 3, &["*.bin"], &[]);
+        let expected = format!("{}:\n  main.rs\n  sub:\n    c.py\n", dir_name(dir.path()));
+        assert_eq!(tree, expected);
+    }
+
+    #[test]
+    fn test_serialize_dir_ignore_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("keep.rs"), "").unwrap();
+        std::fs::write(dir.path().join("skip.bin"), "").unwrap();
+        let tree = serialize_dir(dir.path(), 1, &["*.bin"], &[]);
+        let expected = format!("{}:\n  keep.rs\n", dir_name(dir.path()));
+        assert_eq!(tree, expected);
+    }
+
+    #[test]
+    fn test_serialize_dir_filter_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "").unwrap();
+        let tree = serialize_dir(dir.path(), 1, &[], &["*.rs"]);
+        let expected = format!("{}:\n  a.rs\n", dir_name(dir.path()));
+        assert_eq!(tree, expected);
+    }
+
+    #[test]
+    fn test_serialize_dir_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("deep.rs"), "").unwrap();
+        std::fs::write(dir.path().join("top.txt"), "").unwrap();
+        let tree = serialize_dir(dir.path(), 1, &["*.bin"], &[]);
+        let expected = format!("{}:\n  sub:\n  top.txt\n", dir_name(dir.path()));
+        assert_eq!(tree, expected);
+    }
+
+    // ============================================================
+    // deserialize_tree 测试
+    // ============================================================
+
+    #[test]
+    fn test_deserialize_tree_flat() {
+        let root = "/tmp/proj";
+        let tree = "proj:\n  a.txt\n  b.rs\n";
+        let entries = deserialize_tree(tree, root);
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .any(|e| e.relative_path == "a.txt" && !e.is_dir));
+        assert!(entries
+            .iter()
+            .any(|e| e.relative_path == "b.rs" && !e.is_dir));
+    }
+
+    #[test]
+    fn test_deserialize_tree_nested() {
+        let root = "/tmp/proj";
+        let tree = "proj:\n  main.rs\n  sub:\n    c.py\n";
+        let entries = deserialize_tree(tree, root);
+        assert_eq!(entries.len(), 3);
+        assert!(entries
+            .iter()
+            .any(|e| e.relative_path == "main.rs" && !e.is_dir));
+        assert!(entries.iter().any(|e| e.relative_path == "sub" && e.is_dir));
+        assert!(entries
+            .iter()
+            .any(|e| e.relative_path == "sub/c.py" && !e.is_dir));
+    }
+
+    #[test]
+    fn test_deserialize_tree_empty_dir() {
+        let root = "/tmp/proj";
+        let tree = "proj:\n  sub:\n";
+        let entries = deserialize_tree(tree, root);
+        assert_eq!(entries.len(), 1);
+        assert!(entries.iter().any(|e| e.relative_path == "sub" && e.is_dir));
     }
 }

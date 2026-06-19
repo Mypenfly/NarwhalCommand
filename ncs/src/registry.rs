@@ -277,7 +277,6 @@ impl CommandRegistry {
                 subs: vec![
                     ("Location".to_string(), vec!["Normal".to_string()]),
                     ("Location".to_string(), vec!["Block".to_string()]),
-                    ("Location".to_string(), vec!["Path".to_string()]),
                     ("New".to_string(), vec!["Start".to_string()]),
                     ("New".to_string(), vec!["End".to_string()]),
                 ],
@@ -299,14 +298,6 @@ impl CommandRegistry {
             "Block".to_string(),
             ModeEntry {
                 name: "Block".to_string(),
-                params: vec![],
-                subs: vec![],
-            },
-        );
-        location_modes.insert(
-            "Path".to_string(),
-            ModeEntry {
-                name: "Path".to_string(),
                 params: vec![],
                 subs: vec![],
             },
@@ -370,7 +361,6 @@ impl CommandRegistry {
                 owners: vec![
                     ("Location".to_string(), vec!["Normal".to_string()]),
                     ("Location".to_string(), vec!["Block".to_string()]),
-                    ("Location".to_string(), vec!["Path".to_string()]),
                     ("Open".to_string(), vec!["Start".to_string()]),
                     ("Open".to_string(), vec!["End".to_string()]),
                 ],
@@ -407,7 +397,6 @@ impl CommandRegistry {
                 owners: vec![
                     ("Location".to_string(), vec!["Normal".to_string()]),
                     ("Location".to_string(), vec!["Block".to_string()]),
-                    ("Location".to_string(), vec!["Path".to_string()]),
                 ],
             },
         );

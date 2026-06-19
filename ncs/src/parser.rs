@@ -178,12 +178,21 @@ impl Command {
                 content: new_content,
                 ..
             } => {
+                let base_taps = new_content.base_taps;
                 let cmd_lines: Vec<crate::cmd_content::CmdLine> = new_content
                     .lines
                     .iter()
-                    .map(|nl| crate::cmd_content::CmdLine {
-                        line_num: 0,
-                        content: nl.content.clone(),
+                    .map(|nl| {
+                        let full = if nl.is_raw {
+                            nl.content.clone()
+                        } else {
+                            let actual_taps = base_taps + nl.diff_taps;
+                            format!("{:indent$}{}", "", nl.content, indent = actual_taps)
+                        };
+                        crate::cmd_content::CmdLine {
+                            line_num: 0,
+                            content: full,
+                        }
                     })
                     .collect();
                 input.pending_new_lines = Some(cmd_lines);
@@ -211,8 +220,6 @@ pub enum LocationMode {
     Normal,
     /// 匹配后调用 BlockParser
     Block,
-    /// 在指定文件中执行 Normal 匹配
-    Path,
 }
 
 /// New 命令的插入位置
@@ -407,12 +414,11 @@ impl Parser {
     ) -> Result<Command, ParseError> {
         let mode = resolve_mode(
             mode_str,
-            &["NORMAL", "BLOCK", "PATH"],
+            &["NORMAL", "BLOCK"],
             LocationMode::Normal,
             |m| match m {
                 "NORMAL" => LocationMode::Normal,
                 "BLOCK" => LocationMode::Block,
-                "PATH" => LocationMode::Path,
                 _ => LocationMode::Normal,
             },
         );
@@ -789,7 +795,7 @@ fn parse_new_content(content_lines: &[String]) -> NewContent {
         })
         .collect();
 
-    NewContent { lines }
+    NewContent { lines, base_taps }
 }
 
 /// 从 content_lines 解析 DeleteContent
@@ -973,11 +979,11 @@ mod tests {
 
     #[test]
     fn test_parse_location_without_content() {
-        let commands = lex_and_parse("!@Location Path ./somefile.rs").unwrap();
+        let commands = lex_and_parse("!@Location Block").unwrap();
         assert_eq!(commands.len(), 1);
         match &commands[0] {
             Command::Location { mode, content, .. } => {
-                assert_eq!(*mode, LocationMode::Path);
+                assert_eq!(*mode, LocationMode::Block);
                 assert!(content.is_none());
             }
             _ => panic!("Expected Location command"),
@@ -1475,6 +1481,7 @@ mod tests {
         let cmd = Command::New {
             mode: NewMode::Normal,
             content: NewContent {
+                base_taps: 0,
                 lines: vec![NewLine {
                     diff_taps: 0,
                     content: "new_code();".to_string(),

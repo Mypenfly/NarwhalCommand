@@ -125,7 +125,7 @@ fn authenticate() -> bool {
 | 模式 | 说明 |
 |------|------|
 | `Normal`（默认） | 打开文本文件，加载到内存 |
-| `Dir` | 打开目录，递归扫描（开发中） |
+| `Dir` | 打开目录，递归扫描为树形文本 |
 
 **Normal 模式选项**:
 
@@ -138,7 +138,26 @@ fn authenticate() -> bool {
 !@Open ./src/main.rs                  # 打开整个文件
 !@Open ./src/main.rs start=10         # 从第 10 行开始
 !@Open ./src/main.rs start=10 end=50  # 第 10 到 50 行
+!@Open Dir ./src depth=3 ignore="*.bin" filter="*.rs"
 ```
+
+**Dir 模式**：
+
+目录被序列化为**树形文本**，格式与文件内容一致，后续可使用 Location/New/Delete 命令操作：
+
+```
+dirname:
+  file1.rs
+  file2.txt
+  subdir:
+    nested.py
+```
+
+- `depth`（默认 3）：递归深度
+- `ignore`（默认 `*.bin`）：忽略的文件/目录模式（`,` 分割，支持 `*` 通配符）
+- `filter`：仅保留匹配的文件模式（如 `*.rs,*.py`）
+
+对树形文本的 New/Delete 操作会在 `@/Open` 时反序列化为文件系统变更（创建/删除文件和目录）。diff 输出与文件操作格式一致（`+` 绿色新增，`-` 红色删除）。
 
 ### 3.2 Location — 定位代码位置
 
@@ -151,7 +170,6 @@ fn authenticate() -> bool {
 |------|------|
 | `Normal`（默认） | 基于去空白内容 + diff_taps 匹配 |
 | `Block` | 匹配后用 BlockParser 获取精确块边界 |
-| `Path` | 在指定文件中执行匹配（开发中） |
 
 **匹配规则**:
 1. 取 Location 首行**去空白**后，用 O(1) 哈希索引查找候选行
@@ -281,6 +299,43 @@ fn generate_salt(rounds: u32) -> String {
 @/Open
 ```
 
+### 3.6 Dir 模式 — 目录结构操作
+
+目录被序列化为树形文本，可使用 Location/New/Delete 操作目录结构：
+
+```ncs
+# 查看目录结构
+!@Open Dir ./src depth=3
+# 树形文本内容示例：
+# src:
+#   main.rs
+#   lib.rs
+#   engine:
+#     mod.rs
+
+# 删除文件
+!@Location
+  lib.rs
+!@Delete
+  lib.rs
+@/Open
+
+# 添加新文件
+!@Open Dir ./src
+!@Location
+  main.rs
+!@New
+  new_module.rs
+@/Open
+
+# 删除子目录（Block 模式删除整个子树）
+!@Open Dir ./src
+!@Location Block
+  engine:
+!@Delete Block
+@/Open
+```
+
 ## 4. 完整执行流示例
 
 ### 添加结构体字段
@@ -395,21 +450,59 @@ Error: <标题>
 !@Exec git log --oneline -10
 ```
 
-### 7.3 Read — 读取文件
+### 7.3 Read — 读取文件/目录
 
 ```
 !@Read [mode] <path> [options...]
 ```
 
-读取文件内容并带格式显示。**值输出**（结果不保留）。
+读取文件或目录内容并带格式显示。**值输出**（结果不保留）。路径基于 `work_path` 展开。
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `path` | Path | 文件路径（必填） |
+| 模式 | 说明 |
+|------|------|
+| `Normal`（默认） | 读取文本文件，syntect 语法高亮，带灰色行号（`base16-ocean.dark` 主题） |
+| `Dir` | 目录树形结构，目录蓝加粗，文件普通显示 |
+
+**Normal 模式选项**：
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `start` | Number | 1 | 起始行号（1-based） |
+| `end` | Number | `start + 999` | 结束行号。默认最多显示 1000 行，超出时抛出警告并截断 |
+
+> **注意**：`end` 超出文件总行数时自动截断到末行，不报错。文件行数超过 1000 时默认只显示前 1000 行，可通过 `end` 参数指定更大范围。
 
 ```ncs
-!@Read ./src/main.rs
-!@Read /etc/hosts
+!@Read ./src/main.rs                     # 默认显示前 1000 行
+!@Read ./src/main.rs start=10            # 从第 10 行开始，最多到 1009 行
+!@Read ./src/main.rs start=10 end=50     # 第 10 到 50 行
+!@Read ./src/main.rs end=2000            # 显示前 2000 行
+```
+
+**Dir 模式选项**（与 Open Dir 一致）：
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `depth` | Number | 3 | 递归深度 |
+| `ignore` | String | `"*.bin"` | 忽略的文件/目录模式（`,` 分割，支持 `*` 通配符） |
+| `filter` | String | 空 | 仅保留匹配的文件类型（如 `"*.rs,*.py"`） |
+
+```ncs
+!@Read Dir ./src                                     # 目录树形输出（默认深度 3）
+!@Read Dir ./src depth=1                             # 仅展示一级
+!@Read Dir ./src ignore="*.bin,target"               # 忽略 .bin 文件和 target 目录
+!@Read Dir ./src filter="*.rs"                       # 仅展示 .rs 文件
+```
+
+**Dir 模式输出示例**：
+
+```
+src:
+  lib.rs
+  main.rs
+  engine:
+    mod.rs
+    executor.rs
 ```
 
 ### 7.4 Write — 写入文件
@@ -484,13 +577,22 @@ echo "this will not be parsed as NCS commands"
 !@Bash ls -la           # 在新的工作路径下执行
 ```
 
-## 8. 开发中命令
+### 7.7 Get — 获取已捕获数据
 
-| 命令 | 功能 | 状态 |
-|------|------|:----:|
-| `Get` (高级) | `like=...` 伪装模式 + 块内展开 | Phase 5 |
+```
+!@Get <pool_name> [like=Cmd]
+```
 
-## 9. 参考文档
+从全局 pools 中提取数据。基本读取（无 `like` 参数）已实现。
+
+```ncs
+@/Open | Capture my_result
+!@Get my_result     # 读取捕获的数据
+```
+
+> `like=[!@Cmd]` 伪装模式和 `{}` 占位符替换见 Phase 5。
+
+## 8. 参考文档
 
 | 文档 | 内容 |
 |------|------|

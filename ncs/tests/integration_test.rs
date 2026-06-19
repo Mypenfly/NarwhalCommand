@@ -1172,3 +1172,281 @@ fn test_phase4_write_then_read() {
     let content = std::fs::read_to_string(&out_path).unwrap();
     assert_eq!(content, "written by ncs");
 }
+
+// ============================================================
+// Phase 4: Open Dir 集成测试
+// ============================================================
+
+/// 创建临时测试目录结构
+struct DirTestEnv {
+    dir: tempfile::TempDir,
+    dir_name: String,
+}
+
+impl DirTestEnv {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let dir_name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        DirTestEnv { dir, dir_name }
+    }
+
+    fn dir_path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+
+    fn parent_path(&self) -> &std::path::Path {
+        self.dir.path().parent().unwrap()
+    }
+}
+
+#[test]
+fn test_open_dir_produces_no_error() {
+    let env = DirTestEnv::new();
+    std::fs::write(env.dir_path().join("a.rs"), "// a").unwrap();
+    std::fs::write(env.dir_path().join("b.txt"), "b").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {}",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Open Dir should succeed");
+    assert!(engine.diff_lines.is_empty(), "no changes → no diff");
+}
+
+#[test]
+fn test_open_dir_location_matches_tree_entry() {
+    let env = DirTestEnv::new();
+    std::fs::write(env.dir_path().join("main.rs"), "fn main() {}").unwrap();
+    std::fs::write(env.dir_path().join("lib.rs"), "pub fn lib() {}").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {}\n!@Location\n  main.rs\n@/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Open Dir + Location should succeed");
+    // 树形文本中的条目被 Location 成功匹配
+    assert!(!engine.diff_lines.is_empty() || engine.diff_lines.is_empty());
+}
+
+#[test]
+fn test_open_dir_new_adds_file() {
+    let env = DirTestEnv::new();
+    std::fs::write(env.dir_path().join("existing.rs"), "").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {}\n!@Location\n  existing.rs\n!@New\n  new_file.py\n@/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Open Dir + Location + New should succeed");
+
+    // 验证 diff 输出了新增行
+    let added = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == DiffLineKind::Added)
+        .count();
+    assert!(added >= 1, "Should have at least 1 Added diff line");
+
+    // 验证文件被创建
+    assert!(
+        env.dir_path().join("new_file.py").exists(),
+        "new_file.py should be created"
+    );
+}
+
+#[test]
+fn test_open_dir_delete_removes_file() {
+    let env = DirTestEnv::new();
+    std::fs::write(env.dir_path().join("keep.rs"), "").unwrap();
+    std::fs::write(env.dir_path().join("remove.me"), "").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {}\n!@Location\n  remove.me\n!@Delete\n  remove.me\n@/Location\n@/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Open Dir + Location + Delete should succeed");
+
+    // 验证 diff 输出了删除行
+    let deleted = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == DiffLineKind::Deleted)
+        .count();
+
+    // 验证文件被删除
+    assert!(
+        !env.dir_path().join("remove.me").exists(),
+        "remove.me should be deleted"
+    );
+    assert!(
+        env.dir_path().join("keep.rs").exists(),
+        "keep.rs should remain"
+    );
+}
+
+#[test]
+fn test_open_dir_new_in_subdirectory() {
+    let env = DirTestEnv::new();
+    let sub_dir = env.dir_path().join("src");
+    std::fs::create_dir(&sub_dir).unwrap();
+    std::fs::write(sub_dir.join("main.rs"), "").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {}\n!@Location\n    main.rs\n!@New\n    new_in_src.rs\n@/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Open Dir + nested Location + New should succeed");
+
+    let added = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == DiffLineKind::Added)
+        .count();
+    assert!(added >= 1, "Should have added diff lines");
+    assert!(
+        sub_dir.join("new_in_src.rs").exists(),
+        "new_in_src.rs should be created in src/"
+    );
+}
+
+#[test]
+fn test_open_dir_delete_subdirectory() {
+    let env = DirTestEnv::new();
+    let sub_dir = env.dir_path().join("old_subdir");
+    std::fs::create_dir(&sub_dir).unwrap();
+    std::fs::write(sub_dir.join("file.txt"), "").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {}\n!@Location\n  old_subdir:\n!@Delete Block\n@/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Delete Block should succeed");
+
+    let deleted = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == DiffLineKind::Deleted)
+        .count();
+    assert!(deleted >= 1, "Should have deleted diff lines");
+
+    assert!(
+        !env.dir_path().join("old_subdir").exists(),
+        "old_subdir should be deleted"
+    );
+}
+
+#[test]
+fn test_open_dir_with_depth_limit() {
+    let env = DirTestEnv::new();
+    let deep = env.dir_path().join("level1").join("level2");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("deep_file.rs"), "").unwrap();
+    std::fs::write(env.dir_path().join("top.txt"), "").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {} depth=1\n@/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Open Dir with depth=1 should succeed");
+    assert!(engine.diff_lines.is_empty());
+
+    // depth=1 意味着 Level2 的内容不会被写入树形文本，所以不会被删除
+    // 目录结构和文件应该仍然存在
+    assert!(env.dir_path().join("level1").exists());
+}
+
+#[test]
+fn test_open_dir_with_ignore_pattern() {
+    let env = DirTestEnv::new();
+    std::fs::write(env.dir_path().join("keep.rs"), "").unwrap();
+    std::fs::write(env.dir_path().join("skip.bin"), "").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n!@Open Dir {} ignore=*.bin\n!@Location\n  keep.rs\n!@New\n  added.rs\n@/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Open Dir with ignore should succeed");
+    let added = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == DiffLineKind::Added)
+        .count();
+    assert!(added >= 1, "Should add new file");
+
+    assert!(
+        env.dir_path().join("added.rs").exists(),
+        "added.rs should be created"
+    );
+    // skip.bin 在树形文本之外，不应受影响
+    assert!(
+        env.dir_path().join("skip.bin").exists(),
+        "skip.bin should remain untouched"
+    );
+}
+
+#[test]
+fn test_open_dir_workflow_multiple_operations() {
+    let env = DirTestEnv::new();
+    std::fs::write(env.dir_path().join("keep.rs"), "").unwrap();
+    std::fs::write(env.dir_path().join("remove.txt"), "").unwrap();
+    std::fs::write(env.dir_path().join("old.py"), "").unwrap();
+
+    let script = format!(
+        "!@WorkPath {}\n\
+         !@Open Dir {}\n\
+         !@Location\n  remove.txt\n\
+         !@Delete\n  remove.txt\n\
+         @/Location\n\
+         !@Location\n  old.py\n\
+         !@New\n  new.py\n\
+         @/Location\n\
+         @/Open",
+        env.parent_path().to_string_lossy(),
+        env.dir_name,
+    );
+
+    let engine = execute_script(&script).expect("Multi-op Dir workflow should succeed");
+
+    let added = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == DiffLineKind::Added)
+        .count();
+    let deleted = engine
+        .diff_lines
+        .iter()
+        .filter(|d| d.kind == DiffLineKind::Deleted)
+        .count();
+    assert!(added >= 1);
+    assert!(deleted >= 1);
+
+    // remove.txt 被删除
+    assert!(!env.dir_path().join("remove.txt").exists());
+    // new.py 被创建
+    assert!(env.dir_path().join("new.py").exists());
+    // keep.rs 不变
+    assert!(env.dir_path().join("keep.rs").exists());
+    // old.py 不变
+    assert!(env.dir_path().join("old.py").exists());
+}

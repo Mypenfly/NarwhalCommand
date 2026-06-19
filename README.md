@@ -19,18 +19,18 @@ NCS:   !@Open → !@Location → !@Delete → !@New → @/Open = 统一语义流
 NarwhalCommand/
 ├── n_edit/          # 精确代码编辑引擎（稳定）
 │   ├── src/         # 基于 //!@ 注解的语义级文件修改工具
-│   └── tests/       # 293 个测试
+│   └── tests/       # 297 个测试
 ├── ncs/             # Narwhal Command Script
 │   ├── src/         # 通用命令脚本系统（!@Cmd 语法）
-│   │   ├── commands/  # 各命令执行实现
-│   │   └── engine/    # 引擎核心 + 辅助
-│   └── tests/       # 228 个测试 + 40 个脚本
+│   │   ├── commands/  # 12 个命令实现
+│   │   └── engine/    # 引擎核心 + command_pipeline + executor
+│   └── tests/       # 322 单元测试 + 70 集成测试
 └── docs/            # 设计文档和开发指南
 ```
 
 ## n_edit — 精确代码编辑
 
-使用 `//!@` 前缀的 `.ned` 脚本，通过**去空白内容 + 缩进差异**双重匹配实现格式感知的源码修改。293 个测试，全部通过。
+使用 `//!@` 前缀的 `.ned` 脚本，通过**去空白内容 + 缩进差异**双重匹配实现格式感知的源码修改。297 个测试，全部通过。
 
 ```bash
 cargo run -p n_edit -- script.ned
@@ -45,7 +45,7 @@ cargo run -p n_edit -- script.ned
 | 命令前缀 | `//!@Cmd:` | `!@Cmd` |
 | 关闭符号 | `//!@Off:Cmd` | `@/Cmd` |
 | 执行模型 | 单文件状态机 | 命令注册表 + exec_cmds + pools |
-| 数据传递 | 隐式栈 | 显式 CmdContent convert/out |
+| 数据传递 | 隐式栈 | 显式 CmdContent convert/execute_core/out |
 | 扩展能力 | 无 | Include 动态注册外部命令 |
 
 ```bash
@@ -72,37 +72,36 @@ cargo run -p ncs -- script.ncs
 
 | 类型 | 命令 | 状态 | 说明 |
 |------|------|:----:|------|
-| **文件编辑** | `Open` | ✅ | 打开文件/目录（支持 start/end） |
-| | `Location` | ✅ | 去空白 + diff_taps 语义匹配定位 |
+| **文件编辑** | `Open` | ✅ | 打开文件/目录。Dir 模式序列化为树形文本，支持 Location/New/Delete 操作目录结构 |
+| | `Location` | ✅ | 去空白 + diff_taps 语义匹配定位（Normal/Block） |
 | | `New` | ✅ | Normal/Start/End 模式插入 |
 | | `Delete` | ✅ | Normal/Block 模式删除 |
 | | `Raw` | ✅ | 仅展开，字面量融入父命令 |
-| **系统操作** | `Bash` | ⏳ | 执行 bash 命令（安全审查） |
-| | `Exec` | ⏳ | 直连终端执行 |
-| | `Read` | ⏳ | 读取文件并高亮显示 |
-| | `Write` | ⏳ | 块内容写入文件 |
-| **元命令** | `Include` | ⏳ | 动态导入外部命令 |
-| | `WorkPath` | ⏳ | 设置工作路径 |
-| | `Get` | ⏳ | 从数据池取出内容 |
+| **系统操作** | `Bash` | ✅ | 执行 bash 命令（安全审查：sudo/rm -rf/chmod 777/mkfs/dd/forkbomb 拦截） |
+| | `Exec` | ✅ | `script -c` 直连终端执行，支持彩色/交互输出 |
+| | `Read` | ✅ | 读取文件（start/end）+ syntect 高亮（base16-ocean.dark）；Dir 模式树形结构 |
+| | `Write` | ✅ | Normal 模式写文件（自动创建父目录）；Raw 模式全量原样写入至 EOF |
+| **元命令** | `Include` | ✅ | 动态导入外部命令（ExecMethod: Default/Bash/Script） |
+| | `WorkPath` | ✅ | 设置工作路径（基于脚本父目录），影响后续 `./`、`../` 展开 |
+| | `Get` | ✅ | 从 pools 提取数据；`like` 伪装模式和块内展开待 Phase 5 |
 
 ## 实现阶段
 
 ```
-Phase 0: 项目骨架搭建           ✅
-Phase 1: Lexer + Parser         ✅
-Phase 2: 核心命令（Open/Location/New/Delete/Raw） ✅
-Phase 3: Bash / Exec / Read / Write  ⏳
-Phase 4: Include + WorkPath     ⏳
-Phase 5: Capture / Get / pools  ⏳
-Phase 6: 错误处理 + 终端输出     ⏳
+Phase 0-2: 基础设施 + 核心命令 (Open/Location/New/Delete/Raw)  ✅
+Phase 3:   CmdContent 数据流 + 变更追踪                          ✅
+Phase 4:   独立命令 (Bash/Exec/Read/Write/Include/WorkPath/Get)  ✅
+           + Open Dir 树形文本模式                                ✅
+Phase 5:   Get 高级特性 (like 伪装 + 块内展开)                    ⚠️
+Phase 6:   错误处理打磨 + 终端输出完善                            ⚠️
 ```
 
 ## 开发
 
 ```bash
 cargo build                     # 构建
-cargo test --workspace          # 全量测试
-cargo test -p ncs               # ncs 测试（228 tests）
+cargo test --workspace          # 全量测试 (693 tests)
+cargo test -p ncs               # ncs 测试 (392 tests)
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 cargo run -p ncs -- script.ncs --verbose

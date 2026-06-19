@@ -10,6 +10,7 @@
 pub mod bash;
 pub mod delete;
 pub mod exec;
+pub mod get;
 pub mod include;
 pub mod location;
 pub mod new;

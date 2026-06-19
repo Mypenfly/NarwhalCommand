@@ -499,7 +499,7 @@ enum Command {
 }
 
 enum OpenMode { Normal, Dir }
-enum LocationMode { Normal, Block, Path }
+enum LocationMode { Normal, Block }
 enum NewMode { Normal, Start, End }
 enum DeleteMode { Normal, Block }
 enum WriteMode { Normal, Raw }
@@ -517,12 +517,12 @@ enum WriteMode { Normal, Raw }
 
 **命令类型**: 文件系统读写、行执行（流输出）
 
-**从属命令/模式**: Location（Normal、Block、Path）、New（Start、End）
+**从属命令/模式**: Location（Normal、Block）、New（Start、End）
 
 | 模式 | 说明 |
 |------|------|
 | `Normal`（默认） | 打开文本文件，加载为 `CmdContent` |
-| `Dir` | 打开目录，递归扫描得到 `RawPaths` |
+| `Dir` | 打开目录，递归扫描后序列化为树形文本（如目录名: 缩进文件列表），操作方式与文件内容一致 |
 
 **Normal 模式参数选项**:
 
@@ -542,7 +542,7 @@ enum WriteMode { Normal, Raw }
 **执行流**:
 1. 识别路径，若路径不存在则报错
 2. 若路径是文本文件（或 Normal 模式）→ 打开文件，以 `start`/`end` 限定范围，读入内存为 `CmdContent`
-3. 若路径是目录（Dir 模式）→ 递归扫描，得到目录下所有文件路径列表 `RawPaths`，保存为 `CmdContent`
+3. 若路径是目录（Dir 模式）→ 递归扫描，序列化为树形文本存入 `CmdContent`（含变更追踪），退出时反序列化并应用文件系统变更（创建/删除文件）
 4. `CmdContent.lines` 记录文件行号和内容
 5. 执行完成，加入 `exec_cmds`
 
@@ -568,20 +568,16 @@ enum WriteMode { Normal, Raw }
 |------|------|
 | `Normal` | 基于内容和 diff_taps 匹配定位（与 n_edit 核心逻辑一致） |
 | `Block` | 匹配后使用 BlockParser 获取精确代码块边界 |
-| `Path` | 指定文件路径，在该文件中执行 Normal 模式定位 |
+
 
 **Normal / Block 模式执行流**:
-1. 若前一个 Open 为 Normal 模式 → 在当前文件内容中匹配（与 n_edit 逻辑一致）
-2. 若前一个 Open 为 Dir 模式 → 遍历 `RawPaths` 中的所有文本文件，逐个执行匹配
-3. 匹配流程：首行去空白匹配（O(1) 哈希索引）→ diff_taps + 去空白逐行筛选 → 唯一性校验
-4. Block 模式额外调用 BlockParser 确定精确块边界
-5. 匹配结果保存为 `LocationResult`（用 `CmdContent` 表示，`is_print = true`）
-6. 执行完成，加入 `exec_cmds`
+1. 在 Open 提供的搜索范围（文件内容或 Dir 树形文本）中进行匹配
+2. 匹配流程：首行去空白匹配（O(1) 哈希索引）→ diff_taps + 去空白逐行筛选 → 唯一性校验
+3. Block 模式额外调用 BlockParser 确定精确块边界
+4. 匹配结果保存为 `LocationResult`（用 `CmdContent` 表示，`is_print = true`）
+5. 执行完成，加入 `exec_cmds`
 
-**Path 模式执行流**:
-1. 若前一个 Open 为 Normal → 发布非必要模式警告，继续执行
-2. 验证路径是否在 Open 的 `RawPaths` 之中，不在则报错
-3. 全量打开该文件，后续按 Normal 模式执行
+
 
 > **说明**：n_edit 原有的行号定位（`@66,120`）已移除。原因是多次 New/Delete 后行号偏移会破坏精确性。替代方案是使用多层嵌套 Location 来精确定位。Open 的 `start`/`end` 参数可用于缩小初始文件范围。
 
@@ -1105,7 +1101,7 @@ src/
 
 ### Phase 2: 从 n_edit 迁移核心命令
 - [ ] 迁移 Open（新增 Dir 模式、start/end 参数）
-- [ ] 迁移 Location（移除行号定位，新增 Path 模式）
+- [ ] 迁移 Location（移除行号定位，保留 Normal/Block 模式）
 - [ ] 迁移 New / Delete / Raw（保持核心逻辑不变）
 - [ ] 迁移 matcher、block 模块
 - [ ] 实现 `@/Cmd` 关闭符号 + exec_cmds 管理

@@ -252,6 +252,8 @@ pub struct NewLine {
 pub struct NewContent {
     /// 新增内容的所有行
     pub lines: Vec<NewLine>,
+    /// 新增内容首行的 taps（作为 diff_taps 的基准）
+    pub base_taps: usize,
 }
 
 /// Delete 命令中用户提供的删除内容的一行
@@ -314,6 +316,35 @@ impl FileContent {
     ///
     /// 逐行解析文件内容，计算每行的 taps（行首空格数），
     /// 预计算 stripped_content，构建首行哈希索引。
+    /// 从文本字符串构建 FileContent（不涉及文件系统）
+    pub fn from_text(text: &str) -> Self {
+        let mut lines: Vec<Line> = Vec::new();
+        let mut first_line_index: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for (index, line_content) in text.lines().enumerate() {
+            let taps = count_leading_spaces(line_content);
+            let stripped = stripped_content(line_content);
+
+            first_line_index
+                .entry(stripped.clone())
+                .or_default()
+                .push(index);
+
+            lines.push(Line {
+                line_num: LineNumber::from_index(index),
+                taps,
+                diff_taps: 0,
+                content: line_content.to_string(),
+                stripped_content: stripped,
+            });
+        }
+
+        FileContent {
+            lines,
+            first_line_index,
+        }
+    }
+
     pub fn from_path(path: &str) -> Result<Self, crate::error::FileError> {
         let content =
             std::fs::read_to_string(path).map_err(|e| crate::error::FileError::CannotOpen {

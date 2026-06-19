@@ -208,7 +208,7 @@ enum Command {
 }
 
 enum OpenMode    { Normal, Dir }
-enum LocationMode { Normal, Block, Path }
+enum LocationMode { Normal, Block }
 enum NewMode     { Normal, Start, End }
 enum DeleteMode  { Normal, Block }
 enum WriteMode   { Normal, Raw }

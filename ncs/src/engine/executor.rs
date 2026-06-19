@@ -715,6 +715,7 @@ mod tests {
     #[test]
     fn test_build_new_lines_basic() {
         let content = NewContent {
+            base_taps: 0,
             lines: vec![
                 NewLine {
                     diff_taps: 0,
@@ -739,6 +740,7 @@ mod tests {
     #[test]
     fn test_build_new_lines_raw() {
         let content = NewContent {
+            base_taps: 0,
             lines: vec![NewLine {
                 diff_taps: 4,
                 content: "    raw_line".to_string(),
