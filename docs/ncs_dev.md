@@ -101,6 +101,10 @@
 
 **`!@Write Raw` 模式是唯一例外**：遇到此模式后，从下一行起到文件末尾的**全部内容**直接提取为写入内容，其中的 `!@`、`@/` 等所有标记全部作为原始字符处理，不再解析任何命令。脚本在此 Write 执行完毕后直接退出。
 
+**`!@Raw` 和 `!@Get` 的缩进规则**（Phase 5 起生效）：
+- `!@Raw` 内容不再标记为 `is_raw`（原样输出），而是按命令行的缩进 + diff_taps 计算 taps。这确保 Raw 插入的内容与块内其他行有统一的缩进语义。
+- `!@Get pool_name` 展开时，第一行 taps = 命令行的前导空格数，后续行按 pool 内容首行的 diff_taps 偏移。展开在 `convert()` 阶段完成。
+
 ---
 
 ## 3. 核心数据结构
@@ -269,6 +273,12 @@ struct CmdContent {
 
     /// 数据来源信息（决定变更写回目标：ContentBlock / FileContent / 命令输出）
     source_info: Option<ContentSource>,
+
+    // === 三步流水线内部字段 ===
+    /// 待插入的行列表（New convert 阶段填充，execute_core 阶段消费）
+    pending_new_lines: Option<Vec<CmdLine>>,
+    /// 待删除的行列表（Delete convert 阶段填充，execute_core 阶段消费）
+    pending_delete_lines: Option<Vec<CmdLine>>,
 }
 
 /// 通用的行数据结构
@@ -277,6 +287,9 @@ struct CmdLine {
     line_num: usize,
     /// 行内容
     content: String,
+    /// 若此行由 !@Get pool_name 展开得到，记录 pool 名称
+    /// Phase 5 新增，用于标识需要从 pools 展开的行
+    expand_from_pool: Option<String>,
 }
 
 /// 内容变更记录 — 命令对 CmdContent 的修改追踪
@@ -821,7 +834,7 @@ enum WriteMode { Normal, Raw }
 ### 5.12 Get
 
 ```
-!@Get <pool_name> [like=[!@Cmd ...]]
+!@Get <pool_name>
 ```
 
 **命令类型**: 程序执行、行执行、仅展开
@@ -830,19 +843,48 @@ enum WriteMode { Normal, Raw }
 
 **从属命令/模式**: 无
 
+**说明**: 从全局 `pools` 中提取 `pool_name` 对应的 `CmdContent`，克隆返回。
+
+**块内展开规则**:
+- 在 New/Delete 块内遇到 `!@Get pool_name` 时，展开为 CmdContent.raw_content 并融入父命令内容
+- **缩进计算**：展开的第一行 taps = 命令行缩进，后续行按 pool 内容首行的 diff_taps 偏移
+- 展开在 `convert()` 阶段完成（需 pools 参数）
+- `CmdLine.expand_from_pool` 标记此行来自 Get 展开
+
+**语法变更历史**：
+- 原 `like` 参数已移除，伪装功能独立为 `!@Like` 命令
+- `{}` 占位符替换已废除
+
+---
+
+### 5.13 Like
+
+```
+!@Like <pool_name> like=<command_name> [mode_name]
+```
+
+**命令类型**: 程序执行、行执行、流输出
+
+**所属命令**: 无（独立命令）
+
+**从属命令/模式**: 无
+
 **执行流**:
 1. 从全局 `pools` 中提取 `pool_name` 对应的 `CmdContent`
-2. 若指定 `like` 选项：
-   - 在 `exec_cmds` 中写入 `like` 中指定的命令和模式（伪装成该命令的输出）
-   - 下一个命令由于在 `exec_cmds` 中找到 owner，可接收此 `CmdContent`
-   - 遇到对应的 `@/Cmd` 时，执行和正常关闭相同的逻辑（如 `@/Open` 会写回文件）
-3. 若不指定 `like`：
-   - 展开 `CmdContent.raw_content` 作为纯文本
-   - **不记录到** `exec_cmds`（Get 本身被视同 `!@Raw` 仅展开）
-   - 或作为行执行命令的参数中的占位符 `{}` 的替换源:
-     ```
-     !@Get open_result like=[!@Bash echo "{}"]
-     ```
+2. 将 `<command_name>` （含可选 `mode_name`，默认 "Normal"）写入 `exec_cmds` 作为伪装条目
+3. 将 CmdContent 存入 `last_result`
+4. 后续命令的 `check_owner()` 识别到伪装条目后放行执行
+5. `@/Cmd` 关闭时正常清理伪装条目
+
+**参数**:
+| 参数 | 必填 | 默认值 | 说明 |
+|------|:---:|--------|------|
+| `like` | 是 | — | 伪装的目标命令名 |
+| 位置参数 2 | 否 | `Normal` | 伪装的目标模式名 |
+
+**与 Get 的区别**：
+- `!@Get` 仅用于块内展开，为 `ExpandOnly` 执行类型
+- `!@Like` 用于伪装执行，将内容以伪装身份注入后续命令的 owner 检查链
 
 ---
 
@@ -864,7 +906,7 @@ enum WriteMode { Normal, Raw }
 
 | 类型 | 行为 | 使用场景 |
 |------|------|----------|
-| **流输出** | 执行结果保留在 `exec_cmds` 和内存中，`@/Cmd` 时触发打印，继续传递给从属命令 | Open、Location、Bash |
+| **流输出** | 执行结果保留在 `exec_cmds` 和内存中，`@/Cmd` 时触发打印，继续传递给从属命令 | Open、Location、Bash、Like |
 | **值输出** | 执行结果仅打印后丢弃，不保留不传递 | Read、Exec、Write |
 
 ### 6.3 exec_cmds 管理规则
@@ -1052,7 +1094,8 @@ Error: <title>
 | Write | FileWrite | BlockExec + ValueOutput |
 | Include | ProgramExec | LineExec |
 | WorkPath | None | LineExec |
-| Get | — | LineExec + ExpandOnly |
+| Get | — | LineExec + ExpandOnly（且流输出） |
+| Like | — | LineExec + StreamOutput |
 
 ---
 
@@ -1085,7 +1128,8 @@ src/
 │   ├── write.rs
 │   ├── include.rs
 │   ├── work_path.rs
-│   └── get.rs
+│   ├── get.rs
+│   └── like.rs
 └── file_io.rs           # 文件读写工具函数
 ```
 
@@ -1093,34 +1137,42 @@ src/
 
 ## 10. 开发阶段
 
-### Phase 1: NCS 骨架
-- [ ] 建立新项目骨架（Cargo.toml, lib.rs, main.rs）
-- [ ] 定义 `CmdContent`、`CommandRegistry`、`exec_cmds` 等核心数据结构
-- [ ] 实现新的 Lexer（`!@Cmd` 语法识别）
-- [ ] 实现新的 Parser（命令注册表驱动）
+### Phase 1: NCS 骨架 ✅
+- [x] 建立新项目骨架（Cargo.toml, lib.rs, main.rs）
+- [x] 定义 `CmdContent`、`CommandRegistry`、`exec_cmds` 等核心数据结构
+- [x] 实现新的 Lexer（`!@Cmd` 语法识别）
+- [x] 实现新的 Parser（命令注册表驱动）
 
-### Phase 2: 从 n_edit 迁移核心命令
-- [ ] 迁移 Open（新增 Dir 模式、start/end 参数）
-- [ ] 迁移 Location（移除行号定位，保留 Normal/Block 模式）
-- [ ] 迁移 New / Delete / Raw（保持核心逻辑不变）
-- [ ] 迁移 matcher、block 模块
-- [ ] 实现 `@/Cmd` 关闭符号 + exec_cmds 管理
+### Phase 2: 从 n_edit 迁移核心命令 ✅
+- [x] 迁移 Open（新增 Dir 模式、start/end 参数）
+- [x] 迁移 Location（移除行号定位，保留 Normal/Block 模式）
+- [x] 迁移 New / Delete / Raw（保持核心逻辑不变）
+- [x] 迁移 matcher、block 模块
+- [x] 实现 `@/Cmd` 关闭符号 + exec_cmds 管理
 
-### Phase 3: 新增命令
-- [ ] Bash / Exec
-- [ ] Read / Write（含 Raw 模式）
-- [ ] Include（命令注册表动态扩展）
-- [ ] WorkPath
+### Phase 3: 新增命令 ✅
+- [x] Bash / Exec
+- [x] Read / Write（含 Raw 模式）
+- [x] Include（命令注册表动态扩展）
+- [x] WorkPath
 
-### Phase 4: 数据传递系统
-- [ ] CmdContent convert/out/send/print 方法
-- [ ] Capture 指令 + Get 命令
-- [ ] pools 全局数据池
+### Phase 4: 数据传递系统 ✅
+- [x] CmdContent convert/out/send/print 方法
+- [x] Capture 指令 + Get 命令
+- [x] pools 全局数据池
 
-### Phase 5: 错误处理 + 输出
-- [ ] 扩展错误类型体系
-- [ ] 彩色终端输出
-- [ ] verbose / quiet 模式
+### Phase 5: Get 展开 + Like 伪装 + Raw 缩进 ✅
+- [x] Get/Like 分离：`!@Get` 纯块内展开，`!@Like` 专注伪装执行
+- [x] Get 块内展开 + 缩进感知（`expand_from_pool` 字段 + `expand_pool_content()` 算法）
+- [x] Raw 缩进计算（`is_raw=false`，按命令行缩进 + diff_taps）
+- [x] `{}` 占位符替换已废除
+
+### Phase 6: 错误处理 + 输出（planned）
+- [ ] 扩展错误类型体系（`CommandNotFound.suggestion` Levenshtein 相似度）
+- [ ] Bash/Exec 超时机制接入
+- [ ] Diff 从 ContentChange 构建
+- [ ] New::Start/End 桥接消除
+- [ ] `--quiet` 标志补全
 
 ---
 

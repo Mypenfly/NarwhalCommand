@@ -63,9 +63,20 @@ pub struct CmdLine {
     pub line_num: usize,
     /// 行内容
     pub content: String,
+    /// 若此行来自 !@Get pool_name 展开需求，记录 pool 名称
+    pub expand_from_pool: Option<String>,
 }
 
 impl CmdLine {
+    /// 创建一个新的 CmdLine，expand_from_pool 默认为 None
+    pub fn new(line_num: usize, content: String) -> Self {
+        CmdLine {
+            line_num,
+            content,
+            expand_from_pool: None,
+        }
+    }
+
     /// 返回去除所有空白字符后的内容，用于模糊匹配
     pub fn stripped_content(&self) -> String {
         self.content
@@ -146,6 +157,8 @@ impl CmdContent {
             .map(|(index, content)| CmdLine {
                 line_num: index + 1,
                 content: content.to_string(),
+
+                expand_from_pool: None,
             })
             .collect();
         CmdContent {
@@ -326,10 +339,14 @@ mod tests {
             CmdLine {
                 line_num: 1,
                 content: "result1".to_string(),
+
+                expand_from_pool: None,
             },
             CmdLine {
                 line_num: 2,
                 content: "result2".to_string(),
+
+                expand_from_pool: None,
             },
         ];
         content.print();
@@ -342,6 +359,8 @@ mod tests {
         content.result = vec![CmdLine {
             line_num: 1,
             content: "should_not_print".to_string(),
+
+            expand_from_pool: None,
         }];
         content.print();
     }
@@ -367,6 +386,8 @@ mod tests {
         let line = CmdLine {
             line_num: 42,
             content: "hello".to_string(),
+
+            expand_from_pool: None,
         };
         assert_eq!(line.line_num, 42);
         assert_eq!(line.content, "hello");
@@ -397,6 +418,8 @@ mod tests {
             .map(|(i, s)| CmdLine {
                 line_num: i + 1,
                 content: s.to_string(),
+
+                expand_from_pool: None,
             })
             .collect()
     }

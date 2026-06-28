@@ -96,7 +96,12 @@ impl Command {
                 engine.pools.insert(pool_name.clone(), content);
                 Ok(internal)
             }
-            Command::Get { pool_name, .. } => crate::commands::get::execute(engine, pool_name),
+            Command::Get { pool_name } => crate::commands::get::execute(engine, pool_name),
+            Command::Like {
+                pool_name,
+                like_cmd,
+                like_mode,
+            } => crate::commands::like::execute(engine, pool_name, like_cmd, like_mode),
             Command::External {
                 name,
                 positional_args,
@@ -124,6 +129,7 @@ impl Command {
             Command::WorkPath { .. } => CmdContent::empty(),
             Command::Bash { .. } => result,
             Command::Get { .. } => result,
+            Command::Like { .. } => result,
             _ => result,
         }
     }
@@ -416,6 +422,8 @@ impl Command {
                 .map(|l| CmdLine {
                     line_num: l.line_num.to_usize(),
                     content: l.content.clone(),
+
+                    expand_from_pool: None,
                 })
                 .collect();
             let raw = cmd_lines
@@ -448,6 +456,8 @@ impl Command {
                 .map(|l| CmdLine {
                     line_num: l.line_num.to_usize(),
                     content: l.content.clone(),
+
+                    expand_from_pool: None,
                 })
                 .collect();
             let raw = cmd_lines

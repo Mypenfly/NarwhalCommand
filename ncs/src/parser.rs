@@ -100,12 +100,19 @@ pub enum Command {
         /// 工作路径
         path: String,
     },
-    /// Get 命令：从 pools 获取数据
+    /// Get 命令：从 pools 获取数据（仅展开，无伪装功能）
     Get {
         /// pool 键名
         pool_name: String,
-        /// 伪装为某个命令
-        like: Option<String>,
+    },
+    /// Like 命令：伪装执行，在 exec_cmds 中加入伪装命令供后续命令 owner 检查
+    Like {
+        /// pool 键名
+        pool_name: String,
+        /// 伪装的目标命令名
+        like_cmd: String,
+        /// 伪装的目标模式名
+        like_mode: String,
     },
     /// 外部/动态注册命令（由 Include 导入）
     External {
@@ -144,6 +151,7 @@ impl Command {
             Command::Include { .. } => "INCLUDE".to_string(),
             Command::WorkPath { .. } => "WORKPATH".to_string(),
             Command::Get { .. } => "GET".to_string(),
+            Command::Like { .. } => "LIKE".to_string(),
             Command::Capture { .. } => "CAPTURE".to_string(),
             Command::External { name, .. } => name.to_uppercase(),
             Command::Close { .. } => "CLOSE".to_string(),
@@ -170,6 +178,7 @@ impl Command {
     pub fn convert(
         &self,
         mut input: crate::cmd_content::CmdContent,
+        pools: &std::collections::HashMap<String, crate::cmd_content::CmdContent>,
     ) -> Result<crate::cmd_content::CmdContent, crate::error::NcsError> {
         match self {
             Command::Open { .. } => Ok(crate::cmd_content::CmdContent::empty()),
@@ -179,28 +188,74 @@ impl Command {
                 ..
             } => {
                 let base_taps = new_content.base_taps;
-                let cmd_lines: Vec<crate::cmd_content::CmdLine> = new_content
-                    .lines
-                    .iter()
-                    .map(|nl| {
-                        let full = if nl.is_raw {
-                            nl.content.clone()
-                        } else {
-                            let actual_taps = base_taps + nl.diff_taps;
-                            format!("{:indent$}{}", "", nl.content, indent = actual_taps)
-                        };
-                        crate::cmd_content::CmdLine {
+                let mut cmd_lines: Vec<crate::cmd_content::CmdLine> = Vec::new();
+
+                for nl in &new_content.lines {
+                    if let Some(pool_name) = &nl.expand_from_pool {
+                        let get_line_taps = base_taps + nl.diff_taps;
+                        if let Some(pool_content) = pools.get(pool_name) {
+                            let expanded = Self::expand_pool_content(pool_content, get_line_taps);
+                            cmd_lines.extend(expanded);
+                        }
+                    } else if nl.is_raw {
+                        cmd_lines.push(crate::cmd_content::CmdLine {
+                            line_num: 0,
+                            content: nl.content.clone(),
+                            expand_from_pool: None,
+                        });
+                    } else {
+                        let actual_taps = base_taps + nl.diff_taps;
+                        let full = format!("{:indent$}{}", "", nl.content, indent = actual_taps);
+                        cmd_lines.push(crate::cmd_content::CmdLine {
                             line_num: 0,
                             content: full,
-                        }
-                    })
-                    .collect();
+                            expand_from_pool: None,
+                        });
+                    }
+                }
+
                 input.pending_new_lines = Some(cmd_lines);
                 Ok(input)
             }
             Command::Delete { .. } => Ok(input),
             _ => Ok(input),
         }
+    }
+
+    /// 将 pool 内容按指定缩进展开为 CmdLine 列表
+    ///
+    /// 展开规则：
+    /// - 第一行 taps = get_line_taps
+    /// - 后续行按相对于 pool 首行的 diff_taps 偏移
+    fn expand_pool_content(
+        pool: &crate::cmd_content::CmdContent,
+        get_line_taps: usize,
+    ) -> Vec<crate::cmd_content::CmdLine> {
+        if pool.lines.is_empty() {
+            return vec![crate::cmd_content::CmdLine {
+                line_num: 0,
+                content: String::new(),
+                expand_from_pool: None,
+            }];
+        }
+
+        let pool_base_taps = crate::model::count_leading_spaces(&pool.lines[0].content);
+
+        pool.lines
+            .iter()
+            .map(|l| {
+                let line_taps = crate::model::count_leading_spaces(&l.content);
+                let diff_taps = line_taps.saturating_sub(pool_base_taps);
+                let actual_taps = get_line_taps + diff_taps;
+                let trimmed = l.content.trim_start().to_string();
+                let content = format!("{:indent$}{}", "", trimmed, indent = actual_taps);
+                crate::cmd_content::CmdLine {
+                    line_num: 0,
+                    content,
+                    expand_from_pool: None,
+                }
+            })
+            .collect()
     }
 }
 
@@ -354,7 +409,8 @@ impl Parser {
                 let path = positional_args.first().cloned().unwrap_or_default();
                 Ok(Command::WorkPath { path })
             }
-            "GET" => Self::parse_get(args, positional_args, line),
+            "GET" => Self::parse_get(positional_args),
+            "LIKE" => Self::parse_like(args, positional_args, line),
             _ => Ok(Command::External {
                 name: cmd_name.to_string(),
                 positional_args: positional_args.to_vec(),
@@ -595,15 +651,39 @@ impl Parser {
     }
 
     /// 解析 Get 命令
-    fn parse_get(
+    fn parse_get(positional_args: &[String]) -> Result<Command, ParseError> {
+        let pool_name = positional_args.first().cloned().unwrap_or_default();
+        Ok(Command::Get { pool_name })
+    }
+
+    /// 解析 Like 命令：!@Like pool_name like=CommandName [ModeName]
+    ///
+    /// like 为必填参数，指定伪装的目标命令名。
+    /// 可选的第二个位置参数为目标模式名（默认 "Normal"）。
+    fn parse_like(
         args: &HashMap<String, String>,
         positional_args: &[String],
-        _line: crate::model::LineNumber,
+        line: crate::model::LineNumber,
     ) -> Result<Command, ParseError> {
         let pool_name = positional_args.first().cloned().unwrap_or_default();
-        let like = args.get("like").cloned();
-
-        Ok(Command::Get { pool_name, like })
+        let like_cmd = args.get("like").cloned().unwrap_or_default();
+        if like_cmd.is_empty() {
+            return Err(ParseError::ParamMissing {
+                cmd_name: "Like".to_string(),
+                mode_name: "Normal".to_string(),
+                param_name: "like".to_string(),
+                line,
+            });
+        }
+        let like_mode = positional_args
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "Normal".to_string());
+        Ok(Command::Like {
+            pool_name,
+            like_cmd,
+            like_mode,
+        })
     }
 
     /// 校验参数是否满足要求
@@ -650,6 +730,8 @@ impl Parser {
                                     diff_taps: 0,
                                     content: content.clone(),
                                     is_raw: true,
+
+                                    expand_from_pool: None,
                                 });
                                 merged = true;
                                 break;
@@ -758,7 +840,8 @@ fn parse_location_content(content_lines: &[String]) -> LocationContent {
 
 /// 从 content_lines 解析 NewContent
 ///
-/// 若行前缀为 `!@Raw `，则标记为 is_raw 并去除前缀。
+/// 若行前缀为 `!@Raw `：按命令行缩进计算 diff_taps，is_raw=false。
+/// 若行前缀为 `!@Get `：按命令行缩进计算 diff_taps，标记 expand_from_pool 供 convert 阶段展开。
 fn parse_new_content(content_lines: &[String]) -> NewContent {
     let base_taps = content_lines
         .first()
@@ -768,28 +851,31 @@ fn parse_new_content(content_lines: &[String]) -> NewContent {
     let lines: Vec<NewLine> = content_lines
         .iter()
         .map(|line| {
-            if let Some(rest) = line.strip_prefix("!@Raw ") {
-                // Raw 行：标记 is_raw，去除前缀
+            let taps = count_leading_spaces(line);
+            let diff_taps = taps.saturating_sub(base_taps);
+
+            if let Some(rest) = line[taps..].strip_prefix("!@Raw ") {
                 NewLine {
-                    diff_taps: 0,
-                    content: rest.to_string(),
-                    is_raw: true,
-                }
-            } else if let Some(rest) = line.strip_prefix("!@Get ") {
-                // Get 行：作为普通行但标记（Phase 2+ 由 Engine 展开）
-                NewLine {
-                    diff_taps: 0,
+                    diff_taps,
                     content: rest.to_string(),
                     is_raw: false,
+                    expand_from_pool: None,
+                }
+            } else if let Some(rest) = line[taps..].strip_prefix("!@Get ") {
+                let pool_name = rest.trim().to_string();
+                NewLine {
+                    diff_taps,
+                    content: String::new(),
+                    is_raw: false,
+                    expand_from_pool: Some(pool_name),
                 }
             } else {
-                let taps = count_leading_spaces(line);
                 let content = line[taps..].to_string();
-                let diff_taps = taps.saturating_sub(base_taps);
                 NewLine {
                     diff_taps,
                     content,
                     is_raw: false,
+                    expand_from_pool: None,
                 }
             }
         })
@@ -1047,7 +1133,7 @@ mod tests {
                 assert_eq!(content.lines[0].content, "normal line");
                 assert!(!content.lines[0].is_raw);
                 assert_eq!(content.lines[1].content, "raw content");
-                assert!(content.lines[1].is_raw);
+                assert!(!content.lines[1].is_raw); // Phase 5: Raw no longer marks is_raw
                 assert_eq!(content.lines[2].content, "another line");
                 assert!(!content.lines[2].is_raw);
             }
@@ -1319,28 +1405,56 @@ mod tests {
 
     #[test]
     fn test_parse_get() {
-        let commands = lex_and_parse("!@Get my_pool like=Bash").unwrap();
+        let commands = lex_and_parse("!@Get my_pool").unwrap();
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            Command::Get { pool_name, like } => {
+            Command::Get { pool_name } => {
                 assert_eq!(pool_name, "my_pool");
-                assert_eq!(like, &Some("Bash".to_string()));
             }
             _ => panic!("Expected Get command"),
         }
     }
 
     #[test]
-    fn test_parse_get_without_like() {
-        let commands = lex_and_parse("!@Get my_pool").unwrap();
+    fn test_parse_like() {
+        let commands = lex_and_parse("!@Like p1 like=Bash").unwrap();
         assert_eq!(commands.len(), 1);
         match &commands[0] {
-            Command::Get { pool_name, like } => {
-                assert_eq!(pool_name, "my_pool");
-                assert_eq!(like, &None);
+            Command::Like {
+                pool_name,
+                like_cmd,
+                like_mode,
+            } => {
+                assert_eq!(pool_name, "p1");
+                assert_eq!(like_cmd, "Bash");
+                assert_eq!(like_mode, "Normal");
             }
-            _ => panic!("Expected Get command"),
+            _ => panic!("Expected Like command"),
         }
+    }
+
+    #[test]
+    fn test_parse_like_with_mode() {
+        let commands = lex_and_parse("!@Like p1 like=Open Dir").unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::Like {
+                pool_name,
+                like_cmd,
+                like_mode,
+            } => {
+                assert_eq!(pool_name, "p1");
+                assert_eq!(like_cmd, "Open");
+                assert_eq!(like_mode, "Dir");
+            }
+            _ => panic!("Expected Like command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_like_missing_like_param_is_error() {
+        let result = lex_and_parse("!@Like p1");
+        assert!(result.is_err());
     }
 
     // ============================================================
@@ -1452,7 +1566,9 @@ mod tests {
             args: HashMap::new(),
         };
         let input = make_empty_content();
-        let result = cmd.convert(input).unwrap();
+        let result = cmd
+            .convert(input, &std::collections::HashMap::new())
+            .unwrap();
         assert!(result.lines.is_empty());
         assert!(result.raw_content.is_empty());
     }
@@ -1472,7 +1588,9 @@ mod tests {
             args: HashMap::new(),
         };
         let input = make_empty_content();
-        let result = cmd.convert(input).unwrap();
+        let result = cmd
+            .convert(input, &std::collections::HashMap::new())
+            .unwrap();
         assert!(result.lines.is_empty());
     }
 
@@ -1486,11 +1604,15 @@ mod tests {
                     diff_taps: 0,
                     content: "new_code();".to_string(),
                     is_raw: false,
+
+                    expand_from_pool: None,
                 }],
             },
         };
         let input = make_empty_content();
-        let result = cmd.convert(input).unwrap();
+        let result = cmd
+            .convert(input, &std::collections::HashMap::new())
+            .unwrap();
         assert!(result.pending_new_lines.is_some());
         let lines = result.pending_new_lines.unwrap();
         assert_eq!(lines.len(), 1);
@@ -1509,7 +1631,9 @@ mod tests {
             }),
         };
         let input = make_empty_content();
-        let result = cmd.convert(input).unwrap();
+        let result = cmd
+            .convert(input, &std::collections::HashMap::new())
+            .unwrap();
         assert!(result.lines.is_empty());
     }
 
@@ -1520,7 +1644,9 @@ mod tests {
         };
         let mut input = CmdContent::empty();
         input.raw_content = "upstream".to_string();
-        let result = cmd.convert(input).unwrap();
+        let result = cmd
+            .convert(input, &std::collections::HashMap::new())
+            .unwrap();
         assert_eq!(result.raw_content, "upstream");
     }
 }

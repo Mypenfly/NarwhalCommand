@@ -637,12 +637,7 @@ impl CommandRegistry {
             "Normal".to_string(),
             ModeEntry {
                 name: "Normal".to_string(),
-                params: vec![ParamDef {
-                    name: "like".to_string(),
-                    required: false,
-                    param_type: ParamType::String,
-                    default: None,
-                }],
+                params: vec![],
                 subs: vec![],
             },
         );
@@ -658,6 +653,38 @@ impl CommandRegistry {
                     OutputType::StreamOutput,
                 ),
                 modes: get_modes,
+                subs: vec![],
+                owners: vec![],
+            },
+        );
+
+        // --- Like ---
+        let mut like_modes = HashMap::new();
+        like_modes.insert(
+            "Normal".to_string(),
+            ModeEntry {
+                name: "Normal".to_string(),
+                params: vec![ParamDef {
+                    name: "like".to_string(),
+                    required: true,
+                    param_type: ParamType::String,
+                    default: None,
+                }],
+                subs: vec![],
+            },
+        );
+        entries.insert(
+            "LIKE".to_string(),
+            CommandEntry {
+                name: "Like".to_string(),
+                exec_path: None,
+                exec_method: ExecMethod::Default,
+                cmd_type: CommandType::with_output(
+                    PermissionType::None,
+                    ExecutionType::LineExec,
+                    OutputType::StreamOutput,
+                ),
+                modes: like_modes,
                 subs: vec![],
                 owners: vec![],
             },
@@ -702,7 +729,7 @@ mod tests {
         let registry = CommandRegistry::init();
         let expected = [
             "OPEN", "LOCATION", "NEW", "DELETE", "RAW", "BASH", "EXEC", "READ", "WRITE", "INCLUDE",
-            "WORKPATH", "GET",
+            "WORKPATH", "GET", "LIKE",
         ];
         for name in &expected {
             assert!(
@@ -711,7 +738,7 @@ mod tests {
                 name
             );
         }
-        assert_eq!(registry.entries.len(), 12);
+        assert_eq!(registry.entries.len(), 13);
     }
 
     #[test]
@@ -859,16 +886,27 @@ mod tests {
     }
 
     #[test]
-    fn test_get_has_like_param() {
+    fn test_like_has_required_like_param() {
         let registry = CommandRegistry::init();
-        let get_cmd = registry.find_command("get").unwrap();
-        let normal_mode = &get_cmd.modes["Normal"];
+        let like_cmd = registry.find_command("like").unwrap();
+        let normal_mode = &like_cmd.modes["Normal"];
         let like_param = normal_mode
             .params
             .iter()
             .find(|p| p.name == "like")
             .unwrap();
-        assert!(!like_param.required, "like should be optional");
+        assert!(
+            like_param.required,
+            "like should be required for Like command"
+        );
         assert_eq!(like_param.param_type, ParamType::String);
+    }
+
+    #[test]
+    fn test_get_has_no_params() {
+        let registry = CommandRegistry::init();
+        let get_cmd = registry.find_command("get").unwrap();
+        let normal_mode = &get_cmd.modes["Normal"];
+        assert!(normal_mode.params.is_empty(), "Get should have no params");
     }
 }

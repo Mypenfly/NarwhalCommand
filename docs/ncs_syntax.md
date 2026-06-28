@@ -1,8 +1,12 @@
-# NCS 语法参考手册
+# NCS 语法手册
 
-NCS（Narwhal Command Script）的脚本语法，涵盖命令结构、执行流、数据传递。
+NCS（Narwhal Command Script）——用脚本编辑代码和操作系统的命令行工具。
 
-## 1. 快速开始
+---
+
+## 一、快速开始
+
+下面这个脚本打开 `src/main.rs`，定位 `fn main()`，在其后插入一行 `println!`，保存退出：
 
 ```ncs
 !@Open ./src/main.rs
@@ -19,483 +23,349 @@ fn main() {
 cargo run -p ncs -- hello.ncs
 ```
 
-## 2. 基本语法
+---
 
-### 2.1 命令前缀
+## 二、语法速览
 
-所有命令以 `!@` 开头：
-
-```
-!@Open ./path/to/file.rs
-```
-
-| 元素 | 说明 |
-|------|------|
-| `!@` | 命令标识符（`!` 示意脚本执行，`@` 标识定向命令） |
-| `Cmd` | 命令名（大小写不敏感，如 `Open`、`opEn`、`OPEN` 等效） |
-
-### 2.2 命令格式
+### 2.1 命令格式
 
 ```
-!@Cmd [mode] [args...]
+!@Cmd [mode] [key=value...] [positional_arg...]
 ```
 
-- **mode**: 模式名（可选）。若省略则默认 `Normal`
-- **args**: 键值对参数，格式 `key=value`。多个参数空格分隔
+所有命令以 `!@` 开头。命令名大小写不敏感（`Open`、`OPEN`、`opEn` 等效）。
 
-示例：
+`mode` 是可选的模式名。若省略则默认 `Normal`。
+
+`key=value` 是键值对参数。不含 `=` 的 token 视为位置参数。
 
 ```ncs
-!@Open Normal tests/data/config.rs start=1 end=10
-!@Open Dir ./src depth=3 ignore="*.bin" filter="*.rs,*.py"
-!@New Start
-!@Location Block
+!@Open Dir ./src depth=3 ignore="*.bin"
+#     ^^^ ^^^^        ^^^^^^
+#     Cmd mode        key=value pairs
+#          positional arg (path)
 ```
 
-### 2.3 行执行 vs 块执行
+### 2.2 行执行 vs 块执行
 
-| 类型 | 行为 | 示例 |
+| 类型 | 说明 | 示例 |
 |------|------|------|
-| **行执行** | 只读取命令所在行 | `!@Open ./file.rs` |
-| **块执行** | 提取从下一行到终止条件的全部内容 | `!@Location` + 内容行 + 终止 |
+| **行执行** | 只读取命令所在行 | `!@Open ./file.rs`、`!@Bash echo hi` |
+| **块执行** | 提取命令下一行到终止条件之间的全部内容 | `!@Location`、`!@New`、`!@Delete`、`!@Write` |
 
-**块执行终止条件**（遇到第一条即停）：
-1. 下一个非仅展开的 `!@Cmd` 行
-2. 对应的 `@/Cmd` 关闭符号
+块执行终止于：
+- 下一个非仅展开的 `!@Cmd` 行
+- 对应的 `@/Cmd` 关闭符号
 
 ```ncs
-!@Location                    # 块执行开始
-fn authenticate() -> bool {
+!@Location              # ← 块开始
+fn authenticate() {
     check_password()
 }
-!@New                         # 上一个 Location 内容在此终止
+!@New                   # ← 上一块终止于此；New 块开始
     log::info!("done");
-@/Open                        # New 内容在此终止
+@/Open                  # ← New 块终止于此
 ```
 
-### 2.4 关闭符号 `@/Cmd`
+### 2.3 关闭符号
 
-关闭对应的命令，触发写回/清理操作：
-
-```ncs
-@/Open      # 关闭 Open，写回文件
-@/Location  # 关闭 Location，弹出 block_stack
+```
+@/Open      # 关闭 Open，将修改写回文件
+@/Location  # 关闭 Location，弹出定位块栈
 @/New       # 关闭 New
-@/Delete    # 关闭 Delete
-@/Write     # 关闭 Write
 ```
 
-脚本末尾的未关闭命令会**隐式关闭**（自动 `@/Open` 写回文件）。
+脚本末尾的未关闭命令会**自动隐式关闭**。例如只写了 `!@Open` 之后的所有编辑命令，末尾没有 `@/Open`——NCS 自动执行写回。
 
-### 2.5 仅展开命令
+### 2.4 缩进规则
 
-`!@Raw` 是仅展开命令——遇到时**不触发块终止**，其内容展开为原始字符融入父命令。
+Location / New / Delete 的缩进匹配中，**Tab 不计入 taps**——只统计 ASCII 空格。所有示例统一使用空格缩进。
 
-> **阶段说明**：`!@Get pool_name` 基本读取已可用（从 pools 提取内容）。`!@Get` 的块内展开和 `like=[!@Cmd]` 伪装模式见 Phase 5。
+`diff_taps` = 当前行前导空格数 − Location 内容首行前导空格数。Location 匹配时会同时比对该值。
 
-```ncs
-!@New
-    let config = load_config();
-!@Raw
-    // 此行不会被当成命令标记，而是原样写入
-    // 即使在内容中包含 !@ 也不会被解析
-@/Open
-```
+---
 
-### 2.6 Capture 指令 — 捕获命令输出
+## 三、场景示例
 
-在关闭符号后通过管道将命令输出存入全局数据池，供后续 `!@Get` 提取：
+以下示例全部来自 `ncs/tests/scripts/`，可直接执行。
 
-```
-@/Open | Capture my_result
-```
+### 3.1 为 Rust 结构体添加方法和删除旧方法
 
-- Capture 发生在 `@/Cmd` 行中
-- 被捕获的命令输出在退出 `exec_cmds` 前复制到 `pools`
-- 键名不可重复（重复则覆盖，打印警告）
+**目标文件** (`tests/data/rust_service.rs`)：
 
-## 3. 文件编辑命令
+```rust
+pub struct User {
+    pub id: u64,
+    pub name: String,
+    pub email: String,
+    pub active: bool,
+}
 
-### 3.1 Open — 打开文件/目录
-
-```
-!@Open [mode] <path> [options...]
-```
-
-| 模式 | 说明 |
-|------|------|
-| `Normal`（默认） | 打开文本文件，加载到内存 |
-| `Dir` | 打开目录，递归扫描为树形文本 |
-
-**Normal 模式选项**:
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `start` | Number | 1 | 起始行号（1-based） |
-| `end` | Number | 文件末 | 结束行号 |
-
-```ncs
-!@Open ./src/main.rs                  # 打开整个文件
-!@Open ./src/main.rs start=10         # 从第 10 行开始
-!@Open ./src/main.rs start=10 end=50  # 第 10 到 50 行
-!@Open Dir ./src depth=3 ignore="*.bin" filter="*.rs"
-```
-
-**Dir 模式**：
-
-目录被序列化为**树形文本**，格式与文件内容一致，后续可使用 Location/New/Delete 命令操作：
-
-```
-dirname:
-  file1.rs
-  file2.txt
-  subdir:
-    nested.py
-```
-
-- `depth`（默认 3）：递归深度
-- `ignore`（默认 `*.bin`）：忽略的文件/目录模式（`,` 分割，支持 `*` 通配符）
-- `filter`：仅保留匹配的文件模式（如 `*.rs,*.py`）
-
-对树形文本的 New/Delete 操作会在 `@/Open` 时反序列化为文件系统变更（创建/删除文件和目录）。diff 输出与文件操作格式一致（`+` 绿色新增，`-` 红色删除）。
-
-### 3.2 Location — 定位代码位置
-
-```
-!@Location [mode]
-定位匹配内容...
-```
-
-| 模式 | 说明 |
-|------|------|
-| `Normal`（默认） | 基于去空白内容 + diff_taps 匹配 |
-| `Block` | 匹配后用 BlockParser 获取精确块边界 |
-
-**匹配规则**:
-1. 取 Location 首行**去空白**后，用 O(1) 哈希索引查找候选行
-2. 对每个候选，逐行比对**去空白内容**和 **diff_taps**（相对缩进差异）
-3. 要求恰好 1 个匹配，否则报错
-
-> **⚠️ 重要：缩进必须用空格，禁止 Tab**
->
-> `taps`（leading spaces count）只统计 ASCII 空格（`0x20`），**Tab 字符不计入 taps**。
-> 若 Location 内容行混用 Tab 和空格，会导致 `diff_taps` 计算错误，匹配失败。
->
-> ```ncs
-> # ❌ 错误：Tab 缩进导致 taps=0，diff_taps 错位
-> !@Location
-> 	Close {           # Tab → taps=0, diff_taps=0
->         name: String, # 空格 → taps=8, diff_taps=8  ← 文件实际是 4
->
-> # ✅ 正确：统一用空格
-> !@Location
->     Close {          # 4空格 → taps=4, diff_taps=0
->         name: String,# 8空格 → taps=8, diff_taps=4 ← 与文件一致
-> ```
->
-> 此规则适用于所有涉及缩进匹配的命令（Location、New、Delete）。`!@Raw` 行不受影响（保持原样）。
-
-```ncs
-# 匹配单个函数签名
-!@Location
-fn authenticate_user(credentials: &Credentials) -> Result<Token, AuthError>
-
-# Block 模式：精确识别函数体边界
-!@Location Block
-fn authenticate_user(credentials: &Credentials) -> Result<Token, AuthError>
-
-# 嵌套定位：先在外部类中定位，再在内部方法中定位
-!@Location
 impl UserService {
-!@Location
-    fn create_user(&mut self, name: &str)
-!@New
-        log::info!("creating user: {}", name);
-@/Location
-@/Location
+    pub fn get_user(&self, id: u64) -> Option<&User> {
+        self.users.get(&id)
+    }
+
+    pub fn count_by_domain(&self, domain: &str) -> usize {
+        self.users.values().filter(|u| u.email.ends_with(domain)).count()
+    }
+}
 ```
 
-### 3.3 New — 插入新内容
-
-```
-!@New [mode]
-插入内容...
-```
-
-| 模式 | 说明 |
-|------|------|
-| `Normal`（默认） | 在 Location 匹配位置之后插入（需要前一个 Location） |
-| `Start` | 在文件开头插入（独立命令，不依赖 Location） |
-| `End` | 在文件末尾插入（独立命令，不依赖 Location） |
-
-> **约束**：`New Normal` 要求前一个 Location 存在于 `exec_cmds` 中。`New Start` 和 `New End` 可直接在文件级操作，无需事先执行 Location。
-
-**缩进规则**: New 内容的每行 `diff_taps` 作为绝对缩进量，以插入位置的 `taps` 为基准计算。
+**脚本** (`rust_nested_edit.ncs`)——添加 `update_email`、删除 `count_by_domain`、在测试模块内插入新用例：
 
 ```ncs
-# 在匹配位置后添加新字段
+!@Open ./tests/data/rust_service.rs
+
+// -- 在 get_user() 之后新增 update_email 方法 --
 !@Location
-pub struct AppConfig {
+    pub fn get_user(&self, id: u64) -> Option<&User> {
+        self.users.get(&id)
+    }
 !@New
-    pub log_level: String,
+    pub fn update_email(&mut self, id: u64, new_email: String) -> Result<(), String> {
+        match self.users.get_mut(&id) {
+            Some(user) => {
+                user.email = new_email;
+                Ok(())
+            }
+            None => Err(format!("User {} not found", id)),
+        }
+    }
+@/Location
 
-# 在文件头部添加许可证
-!@New Start
-// Copyright 2024 Example Corp.
-
-# 在文件尾部添加测试
-!@New End
-#[cfg(test)]
-mod tests { ... }
-```
-
-### 3.4 Delete — 删除内容
-
-```
-!@Delete [mode]
-匹配内容...
-```
-
-| 模式 | 说明 |
-|------|------|
-| `Normal`（默认） | 在 ContentBlock 内逐行匹配并删除 |
-| `Block` | 删除整个 ContentBlock（要求 Location 也用 Block） |
-
-**约束**:
-- 要求连续匹配，不可跳行
-- Delete 首行必须紧邻 Location 最后一行（中间不能有非空行）
-
-```ncs
-# 删除一个方法
+// -- 删除 count_by_domain 方法 --
 !@Location
-/// Generate a random salt string
+    pub fn count_by_domain(&self, domain: &str) -> usize {
+        self.users
+            .values()
+            .filter(|u| u.email.ends_with(domain))
+            .count()
+    }
 !@Delete
-fn generate_salt(rounds: u32) -> String {
-    use rand::Rng;
+    pub fn count_by_domain(&self, domain: &str) -> usize {
+        self.users
+            .values()
+            .filter(|u| u.email.ends_with(domain))
+            .count()
+    }
+@/Location
+
+// -- 嵌套 Location：在 tests 模块内插入新测试 --
+!@Location
+    mod tests {
+!@Location
+        use super::*;
+!@New
+        #[test]
+        fn test_update_email() {
+            let mut svc = UserService::new();
+            let user = svc.create_user("Alice".into(), "a@ex.com".into());
+            svc.update_email(user.id, "b@ex.com".into()).unwrap();
+            assert_eq!(svc.get_user(user.id).unwrap().email, "b@ex.com");
+        }
+@/Location
+@/Location
+
+@/Open
+```
+
+**关键点**：
+- 嵌套 Location：先定位到 `mod tests {`，再定位到 `use super::*;`，最后插入测试函数
+- `@/Location` 必须与 `!@Location` 数量匹配（两个 Location，两个 @/Location）
+
+---
+
+### 3.2 Dart 类方法重构
+
+**目标文件** (`tests/data/dart_auth.dart`)——使用 2-space 缩进（Dart 惯例）：
+
+```dart
+class AuthService {
+  Future<AuthResult> refresh(String refreshToken) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/auth/refresh'),
+      body: {'refresh_token': refreshToken},
+    );
     ...
+  }
+
+  Future<bool> validateSession(String token) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/auth/validate'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    return response.statusCode == 200;
+  }
 }
-
-# Block 删除
-!@Delete Block
 ```
 
-### 3.5 Raw — 字面量内容
-
-```
-!@Raw <content>
-```
-
-仅展开命令。内容作为字面量融入上一个 New 或 Delete 命令，标记 `is_raw`，插入/匹配时保留原始格式。
+**脚本** (`dart_refactor.ncs`)——新增 `logout()` 方法，删除 `validateSession()`：
 
 ```ncs
-!@New
-    fn example() {
-!@Raw
-        // 此行保持原样，不做缩进计算
-        call_something();
-!@Raw
-        // 多个 Raw 可连续使用
+!@Open ./tests/data/dart_auth.dart
+
+// -- 在 refresh() 之后插入 logout() --
+!@Location
+  Future<AuthResult> refresh(String refreshToken) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/auth/refresh'),
+      body: {'refresh_token': refreshToken},
+    );
+    if (response.statusCode != 200) {
+      throw AuthException('Refresh failed');
     }
-@/Open
-```
-
-### 3.6 Dir 模式 — 目录结构操作
-
-目录被序列化为树形文本，可使用 Location/New/Delete 操作目录结构：
-
-```ncs
-# 查看目录结构
-!@Open Dir ./src depth=3
-# 树形文本内容示例：
-# src:
-#   main.rs
-#   lib.rs
-#   engine:
-#     mod.rs
-
-# 删除文件
-!@Location
-  lib.rs
-!@Delete
-  lib.rs
-@/Open
-
-# 添加新文件
-!@Open Dir ./src
-!@Location
-  main.rs
+    final data = jsonDecode(response.body);
+    return AuthResult(
+      token: data['access_token'],
+      refreshToken: data['refresh_token'],
+      expiresAt: DateTime.now().add(
+        Duration(seconds: data['expires_in']),
+      ),
+    );
+  }
 !@New
-  new_module.rs
-@/Open
-
-# 删除子目录（Block 模式删除整个子树）
-!@Open Dir ./src
-!@Location Block
-  engine:
-!@Delete Block
-@/Open
-```
-
-## 4. 完整执行流示例
-
-### 添加结构体字段
-
-```ncs
-!@Open ./src/config.rs
-!@Location
-pub struct AppConfig {
-!@New
-    /// Log level filter
-    pub log_level: String,
-@/Open
-```
-
-### 替换函数实现
-
-```ncs
-!@Open ./src/services.rs
-!@Location
-/// Generate a random salt string
-!@Delete
-fn generate_salt(rounds: u32) -> String {
-    // old implementation
-}
-!@New
-fn generate_salt(rounds: u32) -> Result<String, ServiceError> {
-    // new implementation
-}
-@/Open
-```
-
-### 多操作复合
-
-```ncs
-!@Open ./src/config.rs
-
-# 操作 1: 添加字段
-!@Location
-    pub min_password_length: u32,
-!@New
-    pub log_level: String,
+  Future<void> logout(String token) async {
+    await _client.post(
+      Uri.parse('$baseUrl/auth/logout'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+  }
 @/Location
 
-# 操作 2: 添加方法
+// -- 删除 validateSession() --
 !@Location
-impl AppConfig {
-!@New
-    pub fn reload(&mut self) -> Result<(), String> {
-        *self = AppConfig::from_env();
-        Ok(())
-    }
+  Future<bool> validateSession(String token) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/auth/validate'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    return response.statusCode == 200;
+  }
+!@Delete
+  Future<bool> validateSession(String token) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/auth/validate'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    return response.statusCode == 200;
+  }
 @/Location
 
 @/Open
 ```
 
-## 5. 错误输出格式
+**关键点**：
+- Location 的缩进必须与原文件完全一致（此处为 2-space）
+- Delete 的匹配内容必须和 Location 定位到的行**连续且紧邻**
 
-```
-Error: <标题>
-  <详情行 1>
-  <详情行 2>
-  Hint: <修复建议 1>
-  Hint: <修复建议 2>
-```
+---
 
-颜色：`Error:` 红色加粗，标题黄色，详情灰色，`Hint:` 绿色加粗。管道/重定向时自动关闭颜色。
+### 3.3 Markdown 文档重构
 
-## 6. 与 n_edit (.ned) 的语法对比
+**目标文件** (`tests/data/docs_guide.md`)：
 
-| 功能 | n_edit (.ned) | NCS (.ncs) |
-|------|--------------|------------|
-| 命令前缀 | `//!@Open: path` | `!@Open path` |
-| 内容分隔 | `...` 显式分隔符 | 下一命令自动终止 |
-| 关闭 | `//!@Off:Open` | `@/Open` |
-| 行号定位 | `@66,120` | 已移除，用嵌套 Location 替代 |
-| 扩展性 | 固定 5 个命令 | 12 个命令 + Include 动态扩展 |
-
-## 7. 系统命令
-
-### 7.1 Bash — 执行系统命令
-
-```
-!@Bash <command>
+```markdown
+## Quick Start
+...
+## Deployment
+...
+## Troubleshooting
 ```
 
-通过 `bash -c` 执行命令，捕获 stdout/stderr。**流输出**。
-
-**安全审查**：以下模式被自动拦截：
-- `sudo` — 禁止提权
-- `rm -rf /` — 禁止递归删除根目录
-- `chmod 777 /` — 禁止对根目录设置 777 权限
-- `mkfs.` — 禁止格式化命令
-- `dd if=` — 禁止直接操作磁盘
-- `forkbomb` / `:(){ :|:& };:` — 禁止 fork 炸弹
+**脚本** (`markdown_sections.ncs`)——替换标题、插入章节、更新代码块：
 
 ```ncs
-!@Bash echo "Current dir: $(pwd)"
-!@Bash grep "fn main" ./src/main.rs
+!@Open ./tests/data/docs_guide.md
+
+// -- 标题替换 --
+!@Location
+## Quick Start
+!@Delete
+## Quick Start
+!@New
+## Getting Started
+@/Location
+
+// -- 在 Deployment 之后插入 Security 章节 --
+!@Location
+## Deployment
+!@New
+## Security
+
+For production security, follow these best practices:
+
+- Enable HTTPS with TLS 1.3
+- Rotate API keys every 90 days
+- Use environment variables for secrets
+@/Location
+
+// -- 更新安装代码块 --
+!@Location
+```bash
+git clone https://github.com/example/project.git
+cd project
+cargo build --release
+```
+!@Delete
+```bash
+git clone https://github.com/example/project.git
+cd project
+cargo build --release
+```
+!@New
+```bash
+git clone https://github.com/example/project.git
+cd project
+cargo build --release
+cargo test
+cargo install --path .
+```
+@/Location
+
+@/Open
 ```
 
-### 7.2 Exec — 直连终端执行
+**关键点**：
+- 一个 `!@Open` 下可有多个 `!@Location`——每对 Location 是对文件的独立编辑
+- 代码块也可以作为 Location 的匹配内容（注意区分 markdown 的 ```` ``` ```` 和 NCS 语法）
 
-```
-!@Exec <command>
-```
+---
 
-通过 `script -c` 直连终端执行，支持彩色输出、流式输出和交互。**值输出**（结果不保留）。
+### 3.4 Bash 执行 + 文件编辑
 
 ```ncs
-!@Exec cargo build --release
-!@Exec git log --oneline -10
+// -- 执行 bash，输出到终端 --
+!@Bash echo "Test timestamp:" && date -u
+
+// -- 打开文件，在末尾追加内容 --
+!@Open ./tests/data/docs_guide.md
+!@Location
+## Troubleshooting
+!@New
+## Test Results
+
+This section was added by the NCS bash test.
+The test ran successfully.
+@/Location
+@/Open
 ```
 
-### 7.3 Read — 读取文件/目录
+Bash 执行 stdout 会以黄色 `Bash:` 前缀打印到终端。`!@Bash` 结果自动转为 `CmdContent`，可被后续命令（如 Capture）使用。
 
-```
-!@Read [mode] <path> [options...]
-```
+---
 
-读取文件或目录内容并带格式显示。**值输出**（结果不保留）。路径基于 `work_path` 展开。
+### 3.5 目录操作（Dir 模式）
 
-| 模式 | 说明 |
-|------|------|
-| `Normal`（默认） | 读取文本文件，syntect 语法高亮，带灰色行号（`base16-ocean.dark` 主题） |
-| `Dir` | 目录树形结构，目录蓝加粗，文件普通显示 |
+`!@Open Dir` 将目录序列化为**树形文本**，后续可像操作文件一样使用 Location/New/Delete 管理目录结构。
 
-**Normal 模式选项**：
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `start` | Number | 1 | 起始行号（1-based） |
-| `end` | Number | `start + 999` | 结束行号。默认最多显示 1000 行，超出时抛出警告并截断 |
-
-> **注意**：`end` 超出文件总行数时自动截断到末行，不报错。文件行数超过 1000 时默认只显示前 1000 行，可通过 `end` 参数指定更大范围。
+**查看目录**：
 
 ```ncs
-!@Read ./src/main.rs                     # 默认显示前 1000 行
-!@Read ./src/main.rs start=10            # 从第 10 行开始，最多到 1009 行
-!@Read ./src/main.rs start=10 end=50     # 第 10 到 50 行
-!@Read ./src/main.rs end=2000            # 显示前 2000 行
+!@Read Dir ./src depth=2 filter="*.rs"
 ```
 
-**Dir 模式选项**（与 Open Dir 一致）：
-
-| 参数 | 类型 | 默认 | 说明 |
-|------|------|------|------|
-| `depth` | Number | 3 | 递归深度 |
-| `ignore` | String | `"*.bin"` | 忽略的文件/目录模式（`,` 分割，支持 `*` 通配符） |
-| `filter` | String | 空 | 仅保留匹配的文件类型（如 `"*.rs,*.py"`） |
-
-```ncs
-!@Read Dir ./src                                     # 目录树形输出（默认深度 3）
-!@Read Dir ./src depth=1                             # 仅展示一级
-!@Read Dir ./src ignore="*.bin,target"               # 忽略 .bin 文件和 target 目录
-!@Read Dir ./src filter="*.rs"                       # 仅展示 .rs 文件
-```
-
-**Dir 模式输出示例**：
-
+输出示例：
 ```
 src:
   lib.rs
@@ -505,97 +375,297 @@ src:
     executor.rs
 ```
 
-### 7.4 Write — 写入文件
-
-```
-!@Write [mode] <path>
-写入内容...
-@/Write
-```
-
-| 模式 | 说明 |
-|------|------|
-| `Normal`（默认） | 将块内容写入文件（自动创建父目录） |
-| `Raw` | 从下一行到脚本末尾的全部内容原样写入（程序退出） |
-
-**Normal 模式**会检查路径是否为文件类型，路径不存在则自动创建父目录。**值输出**（结果不保留）。
+**删除文件**：
 
 ```ncs
-# 写入普通内容
-!@Write Normal ./output/result.txt
-第一阶段输出：
-总计处理 1,234 条记录。
+!@Open Dir ./src
+!@Location
+  lib.rs
+!@Delete
+  lib.rs
+@/Open
+```
+
+**创建新文件**：
+
+```ncs
+!@Open Dir ./src
+!@Location
+  main.rs
+!@New
+  new_module.rs
+@/Open
+```
+
+`@/Open` 时，树形文本的变更反序列化为文件系统操作——新增行对应创建文件，删除行对应删除文件。
+
+---
+
+### 3.6 外部命令（Include）
+
+通过 `!@Include` 注册外部程序为 NCS 命令。以下示例注册一个 Python 脚本并调用：
+
+**Python 脚本** (`tests/data/python_echo.py`)：
+
+```python
+#!/usr/bin/env python3
+import sys
+if len(sys.argv) > 1:
+    print(" ".join(sys.argv[1:]))
+else:
+    print("(no args)")
+```
+
+**NCS 脚本** (`include_python.ncs`)：
+
+```ncs
+// -- 注册外部命令（exec=default 使用 shebang 执行） --
+!@Include ./tests/data/python_echo.py alias=echop
+
+// -- 调用外部命令 --
+!@echop Hello from NCS via Include Python!
+```
+
+**Include 参数**：
+
+| 参数 | 必填 | 默认值 | 说明 |
+|------|:---:|--------|------|
+| `alias` | 是 | — | 命令别名（禁止与内置命令重名） |
+| `block` | 否 | `false` | 是否支持块执行 |
+| `exec` | 否 | `default` | 执行方式：`default`（直接执行）、`bash`（`bash -c`）、`script`（`script -c`） |
+
+---
+
+### 3.7 Capture + Like：捕获输出并伪装执行
+
+Capture 管在 `@/Cmd` 处将命令的最终内容存入全局数据池。Like 将池中内容以伪装身份注入后续流程。
+
+```ncs
+// -- Step 1: 打开文件，捕获内容 --
+!@Open ./tests/data/docs_guide.md
+@/Open | Capture doc_pool
+
+// -- Step 2: 伪装为 Open 命令，让后续编辑有 Open 上下文 --
+!@Like doc_pool like=Open
+
+// -- Step 3: 伪装身份下继续编辑 --
+!@Open ./tests/data/docs_guide.md
+!@Location
+## Troubleshooting
+!@New
+### Performance Issues
+
+If you see high CPU usage, check the worker thread count.
+@/Location
+@/Open
+```
+
+**数据流**：
+
+```
+Open → @/Open | Capture doc_pool  →  pools["doc_pool"] = CmdContent
+                                        │
+!@Like doc_pool like=Open         →  exec_cmds += ("Open", "Normal")
+                                        │
+!@Open ... (后续编辑正常进行)         ←  check_owner 通过，因为 "Open" 在 exec_cmds 中
+```
+
+---
+
+### 3.8 WorkPath + Write + Read
+
+`!@WorkPath` 切换工作目录，影响后续所有相对路径。`!@Write` 写入文件（自动创建父目录），`!@Read` 带语法高亮读取。
+
+```ncs
+// -- 切换到测试数据目录 --
+!@WorkPath ./tests/data
+
+// -- 写入新配置文件 --
+!@Write Normal _ncs_config.toml
+# Auto-generated by NCS
+
+[server]
+host = "0.0.0.0"
+port = 8080
 @/Write
 
-# Raw 模式：以下所有内容原样写入到 EOF
+// -- 带语法高亮读取 --
+!@Read _ncs_config.toml start=1 end=5
+```
+
+`!@Write Raw` 是特殊模式：从下一行到脚本末尾的**全部内容**原样写入，其中的 `!@`、`@/` 等标记全部作为原始字符。脚本在此 Write 执行完毕后直接退出。
+
+```ncs
 !@Write Raw ./output/script.sh
 #!/bin/bash
-echo "this will not be parsed as NCS commands"
-!@NotACommand just raw text
+echo "This will NOT be parsed as NCS"
+!@NotACommand
 @/NotARealClose
-# 脚本在此退出，不再执行后续命令
 ```
 
-### 7.5 Include — 导入外部命令
+---
 
-```
-!@Include <path> alias=<name> [block=true] [type=StreamOutput] [exec=script]
-```
+### 3.9 Raw 内容与 Get 展开
 
-动态注册外部命令到命令注册表。
+`!@Raw` 是仅展开命令——出现在 New/Delete 块内时不触发块终止，其内容融入父命令。Raw 行的缩进按命令行位置自动计算。
 
-| 参数 | 必填 | 说明 |
-|------|:---:|------|
-| `alias` | 是 | 命令别名（禁止与内置命令重名） |
-| `block` | 否 | 是否支持块执行（默认 `false`） |
-| `type` | 否 | 输出类型：`StreamOutput` / `OnlyPrint`（默认 `OnlyPrint`） |
-| `exec` | 否 | 执行方式：`default` / `script` / `bash`（默认 `default`） |
-
-**校验**：alias 不与内置命令重名 → 返回 `AliasConflict` 错误。
+`!@Get pool_name` 从全局数据池取出内容展开到块内，同样按命令行缩进对齐。
 
 ```ncs
-!@Include /usr/local/bin/mytool alias=MyTool type=StreamOutput
-!@Include ./tools/formatter.sh alias=Format exec=bash block=true
+!@Open ./tests/data/rust_service.rs
+
+// -- 使用 Raw 插入多行（缩进自动对齐） --
+!@Location
+    pub fn list_active(&self) -> Vec<&User> {
+        self.users
+            .values()
+            .filter(|u| u.active)
+            .collect()
+    }
+!@New
+    pub fn find_by_name(&self, name: &str) -> Vec<&User> {
+!@Raw self.users.values()
+!@Raw     .filter(|u| u.name.contains(name))
+!@Raw     .collect()
+    }
+@/Location
+
+@/Open
 ```
 
-### 7.6 WorkPath — 设置工作目录
+**缩进规则**：
+- `!@Raw` 行的 taps = 命令行前导空格数
+- 后续 Raw 行按 diff_taps 偏移
+- `!@Get` 展开同理：第一行 taps = `!@Get` 命令行的缩进，后续行按 pool 内容首行的 diff_taps 偏移
 
-```
-!@WorkPath <path>
-```
+---
 
-修改进程当前工作目录，影响后续所有 `./`、`../` 路径的展开。
+### 3.10 全命令流水线
 
-- 路径必须存在，否则报错
-- 若路径为文件，取其父目录
-- 脚本中未遇到 `!@WorkPath` 时，工作路径默认为脚本文件的父目录
+一次脚本中组合 Bash、Open、Location、New、Delete Block、New End：
 
 ```ncs
-!@WorkPath ./src/
-!@Open main.rs          # 相对于新的工作路径
-!@WorkPath /tmp/
-!@Bash ls -la           # 在新的工作路径下执行
+// -- Bash 时间戳 --
+!@Bash echo "Full Pipeline Test" && date -u
+
+// -- 打开 Rust 文件 --
+!@Open ./tests/data/rust_service.rs
+
+// -- 为 User 添加 Display 实现 --
+!@Location
+pub struct User {
+    pub id: u64,
+    pub name: String,
+    pub email: String,
+    pub active: bool,
+}
+!@New
+impl std::fmt::Display for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "User({}, {}, active={})", self.id, self.name, self.active)
+    }
+}
+@/Location
+
+// -- Block 删除：删除整个 count_by_domain 方法 --
+!@Location
+    pub fn count_by_domain(&self, domain: &str) -> usize {
+        self.users
+            .values()
+            .filter(|u| u.email.ends_with(domain))
+            .count()
+    }
+!@Delete Block
+@/Location
+
+// -- 在文件末尾新增 total_users 方法 --
+!@New End
+/// Returns the total number of registered users.
+pub fn total_users(&self) -> usize {
+    self.users.len()
+}
+
+@/Open
 ```
 
-### 7.7 Get — 获取已捕获数据
+**关键点**：
+- `!@Delete Block` 删除整个 Location 定位到的代码块
+- `!@New End` 直接追加到文件末尾，无需 Location
+- `!@New End` 的 `@/New` 可以省略——脚本末尾的 `@/Open` 会隐式关闭
 
-```
-!@Get <pool_name> [like=Cmd]
-```
+---
 
-从全局 pools 中提取数据。基本读取（无 `like` 参数）已实现。
+## 四、命令速查表
 
-```ncs
-@/Open | Capture my_result
-!@Get my_result     # 读取捕获的数据
-```
+### 文件编辑
 
-> `like=[!@Cmd]` 伪装模式和 `{}` 占位符替换见 Phase 5。
+| 命令 | 格式 | 说明 |
+|------|------|------|
+| **Open** | `!@Open [Normal\|Dir] <path> [start=N] [end=N]` | 打开文件/目录 |
+| **Location** | `!@Location [Normal\|Block]` + 内容 | 定位代码位置 |
+| **New** | `!@New [Normal\|Start\|End]` + 内容 | 插入新内容 |
+| **Delete** | `!@Delete [Normal\|Block]` + 内容 | 删除匹配内容 |
+| **Raw** | `!@Raw <content>` | 字面量内容（仅展开） |
 
-## 8. 参考文档
+### 系统命令
 
-| 文档 | 内容 |
+| 命令 | 格式 | 说明 |
+|------|------|------|
+| **Bash** | `!@Bash <command>` | bash -c 执行 |
+| **Exec** | `!@Exec <command>` | script -c 直连终端 |
+| **Read** | `!@Read [Normal\|Dir] <path>` | 带高亮读取文件/目录 |
+| **Write** | `!@Write [Normal\|Raw] <path>` + 内容 | 写入文件 |
+
+### 元命令
+
+| 命令 | 格式 | 说明 |
+|------|------|------|
+| **Include** | `!@Include <path> alias=X [exec=Y]` | 注册外部命令 |
+| **WorkPath** | `!@WorkPath <path>` | 切换工作目录 |
+| **Get** | `!@Get <pool_name>` | 从数据池取值 |
+| **Like** | `!@Like <pool_name> like=Cmd [Mode]` | 伪装执行 |
+| **Capture** | `@/Open \| Capture <name>` | 捕获命令输出到数据池 |
+
+### 关闭符号
+
+| 符号 | 作用 |
 |------|------|
-| [INSTRUCTION.md](INSTRUCTION.md) | 总体设计、数据结构、算法 |
-| [ncs_dev.md](ncs_dev.md) | NCS 命令定义和执行流 |
-| [phases.md](phases.md) | 实现阶段和进度 |
+| `@/Open` | 写回文件并退出 |
+| `@/Location` | 弹出定位块栈 |
+| `@/New` | 完成插入操作 |
+| `@/Delete` | 完成删除操作 |
+
+---
+
+## 五、错误输出格式
+
+```
+Error: 标题（黄色）
+  详情行（灰色）
+  详情行（灰色）
+  Hint: 修复建议（绿色）
+  Hint: 修复建议（绿色）
+```
+
+常见错误：
+
+| 错误 | 原因 | 解决 |
+|------|------|------|
+| `Location 命令未找到任何匹配` | 定位内容在文件中找不到 | 检查缩进是否与目标文件一致 |
+| `Location 命令找到多个匹配` | 定位内容不够精确 | 多写几行内容做精确匹配 |
+| `Block 栈为空` | @/Location 数量与 !@Location 不匹配 | 确保成对出现 |
+| `OwnerNotExecuted` | 从属命令缺少前置的 owner | New 前面必须有 Location |
+
+管道/重定向时自动关闭颜色输出。
+
+---
+
+## 六、与 n_edit (.ned) 的对比
+
+| 功能 | n_edit | NCS |
+|------|--------|-----|
+| 命令前缀 | `//!@Open: path` | `!@Open path` |
+| 内容分隔 | `...` 显式分隔符 | 下一命令自动终止 |
+| 关闭 | `//!@Off:Open` | `@/Open` |
+| 行号定位 | `@66,120` | 已移除（用嵌套 Location 替代） |
+| 命令数 | 5 | 13 + Include 动态扩展 |

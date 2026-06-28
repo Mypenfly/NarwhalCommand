@@ -106,6 +106,8 @@ fn execute_normal(engine: &mut Engine, content: NewContent) -> Result<(), NcsErr
             .map(|l| crate::cmd_content::CmdLine {
                 line_num: l.line_num.to_usize(),
                 content: l.content.clone(),
+
+                expand_from_pool: None,
             })
             .collect();
         let after_line = insert_pos.saturating_sub(1);
@@ -175,6 +177,8 @@ mod tests {
                     diff_taps: *diff_taps,
                     content: content.to_string(),
                     is_raw: *is_raw,
+
+                    expand_from_pool: None,
                 })
                 .collect(),
         }
@@ -226,6 +230,8 @@ mod tests {
             .map(|l| crate::cmd_content::CmdLine {
                 line_num: l.line_num.to_usize(),
                 content: l.content.clone(),
+
+                expand_from_pool: None,
             })
             .collect();
         let raw = cmd_lines

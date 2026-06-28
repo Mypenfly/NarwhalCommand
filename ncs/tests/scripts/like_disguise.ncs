@@ -1,0 +1,25 @@
+// ============================================================
+// Test: like_disguise.ncs
+// Purpose: Test Like command - disguise pool content as another command.
+//   - Open a file, capture content
+//   - Use Like to disguise the content as another command
+//   - Verify the disguised command is in exec_cmds
+// ============================================================
+
+// -- Step 1: Open the docs file and capture --
+!@Open ./tests/data/docs_guide.md
+@/Open | Capture doc_pool
+
+// -- Step 2: Disguise the captured content as an Open command --
+!@Like doc_pool like=Open
+
+// -- Step 3: Now pretend to be in an Open context; use another Open --
+!@Open ./tests/data/docs_guide.md
+!@Location
+## Troubleshooting
+!@New
+### Performance Issues
+
+If you see high CPU usage, check the worker thread count.
+@/Location
+@/Open

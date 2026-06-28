@@ -1,0 +1,64 @@
+// ============================================================
+// Test: rust_nested_edit.ncs
+// Purpose: Complex nested Location editing in Rust.
+//   - Add a new method update_email() after get_user()
+//   - Delete the count_by_domain() method
+//   - Insert an import for std::fmt at the top
+//   - Add a trait implementation inside the test module
+// ============================================================
+
+// -- Step 1: Open the Rust service file --
+!@Open ./tests/data/rust_service.rs
+
+// -- Step 2: Add update_email method after get_user() --
+!@Location
+    pub fn get_user(&self, id: u64) -> Option<&User> {
+        self.users.get(&id)
+    }
+!@New
+    pub fn update_email(&mut self, id: u64, new_email: String) -> Result<(), String> {
+        match self.users.get_mut(&id) {
+            Some(user) => {
+                user.email = new_email;
+                Ok(())
+            }
+            None => Err(format!("User {} not found", id)),
+        }
+    }
+@/Location
+
+// -- Step 3: Delete the count_by_domain() method --
+!@Location
+    pub fn count_by_domain(&self, domain: &str) -> usize {
+        self.users
+            .values()
+            .filter(|u| u.email.ends_with(domain))
+            .count()
+    }
+!@Delete
+    pub fn count_by_domain(&self, domain: &str) -> usize {
+        self.users
+            .values()
+            .filter(|u| u.email.ends_with(domain))
+            .count()
+    }
+@/Location
+
+// -- Step 4: Insert fmt::Display impl inside test module --
+!@Location
+    mod tests {
+!@Location
+        use super::*;
+!@New
+        #[test]
+        fn test_update_email() {
+            let mut svc = UserService::new();
+            let user = svc.create_user("Alice".into(), "a@ex.com".into());
+            svc.update_email(user.id, "b@ex.com".into()).unwrap();
+            assert_eq!(svc.get_user(user.id).unwrap().email, "b@ex.com");
+        }
+@/Location
+@/Location
+
+// -- Close and save --
+@/Open

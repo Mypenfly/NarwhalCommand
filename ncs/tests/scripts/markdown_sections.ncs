@@ -1,0 +1,58 @@
+// ============================================================
+// Test: markdown_sections.ncs
+// Purpose: Markdown document restructuring.
+//   - Replace "Quick Start" section with "Getting Started"
+//   - Add a new "Security" section after "Deployment"
+//   - Update "Installation" code block with new commands
+// ============================================================
+
+// -- Step 1: Open the markdown guide --
+!@Open ./tests/data/docs_guide.md
+
+// -- Step 2: Replace "Quick Start" heading with "Getting Started" --
+!@Location
+## Quick Start
+!@Delete
+## Quick Start
+!@New
+## Getting Started
+@/Location
+
+// -- Step 3: Add "Security" section after "Deployment" --
+!@Location
+## Deployment
+!@New
+## Security
+
+For production security, follow these best practices:
+
+- Enable HTTPS with TLS 1.3
+- Rotate API keys every 90 days
+- Use environment variables for secrets
+@/Location
+
+// -- Step 4: Update the Installation code block --
+!@Location
+```bash
+git clone https://github.com/example/project.git
+cd project
+cargo build --release
+```
+!@Delete
+```bash
+git clone https://github.com/example/project.git
+cd project
+cargo build --release
+```
+!@New
+```bash
+git clone https://github.com/example/project.git
+cd project
+cargo build --release
+cargo test
+cargo install --path .
+```
+@/Location
+
+// -- Close and save --
+@/Open

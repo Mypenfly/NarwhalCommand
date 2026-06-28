@@ -1,0 +1,51 @@
+// ============================================================
+// Test: full_pipeline.ncs
+// Purpose: Combined multi-step pipeline exercising many commands.
+//   - Bash execution
+//   - Open + Location + New (Display impl)
+//   - Location + Delete Block (remove count_by_domain)
+// ============================================================
+
+// -- Step 1: Bash to get system info --
+!@Bash echo "NCS Full Pipeline Test" && date -u
+
+// -- Step 2: Open Rust service --
+!@Open ./tests/data/rust_service.rs
+
+// -- Step 3: Add a Display impl for User after the struct --
+!@Location
+pub struct User {
+    pub id: u64,
+    pub name: String,
+    pub email: String,
+    pub active: bool,
+}
+!@New
+impl std::fmt::Display for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "User({}, {}, active={})", self.id, self.name, self.active)
+    }
+}
+@/Location
+
+// -- Step 4: Delete the count_by_domain method (entire block) --
+!@Location
+    pub fn count_by_domain(&self, domain: &str) -> usize {
+        self.users
+            .values()
+            .filter(|u| u.email.ends_with(domain))
+            .count()
+    }
+!@Delete Block
+@/Location
+
+// -- Step 5: Add a utility method at file end --
+// Note: No @/New — !@New End block is implicitly closed by @/Open
+!@New End
+/// Returns the total number of registered users.
+pub fn total_users(&self) -> usize {
+    self.users.len()
+}
+
+// -- Close and save --
+@/Open

@@ -1,0 +1,25 @@
+// ============================================================
+// Test: bash_capture_get.ncs
+// Purpose: Bash execution + file edit.
+//   - Run a bash command (echo + date)
+//   - Open markdown and add content
+// ============================================================
+
+// -- Step 1: Run bash to get a timestamp --
+!@Bash echo "Test timestamp:" && date -u
+
+// -- Step 2: Open the markdown guide --
+!@Open ./tests/data/docs_guide.md
+
+// -- Step 3: Add a new section at the end --
+!@Location
+## Troubleshooting
+!@New
+## Test Results
+
+This section was added by the NCS bash_capture_get test.
+The test ran successfully.
+@/Location
+
+// -- Close and save --
+@/Open

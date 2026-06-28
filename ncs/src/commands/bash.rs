@@ -55,6 +55,8 @@ pub fn execute(command: &str) -> Result<CmdContent, NcsError> {
             .map(|(i, l)| crate::cmd_content::CmdLine {
                 line_num: i + 1,
                 content: l.to_string(),
+
+                expand_from_pool: None,
             })
             .collect();
     }

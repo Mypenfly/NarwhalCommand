@@ -1,0 +1,29 @@
+// ============================================================
+// Test: raw_expand.ncs
+// Purpose: Test Raw command indentation + Get inside block expansion.
+//   - Open a Rust file
+//   - Use !@Raw inside a New block (indent-aware)
+//   - Verify indentation is consistent
+// ============================================================
+
+// -- Step 1: Open the Rust service file --
+!@Open ./tests/data/rust_service.rs
+
+// -- Step 2: Add a new method with Raw inline content --
+!@Location
+    pub fn list_active(&self) -> Vec<&User> {
+        self.users
+            .values()
+            .filter(|u| u.active)
+            .collect()
+    }
+!@New
+    pub fn find_by_name(&self, name: &str) -> Vec<&User> {
+!@Raw self.users.values()
+!@Raw     .filter(|u| u.name.contains(name))
+!@Raw     .collect()
+    }
+@/Location
+
+// -- Step 3: Close and save --
+@/Open

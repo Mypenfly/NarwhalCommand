@@ -231,6 +231,8 @@ mod tests {
             .map(|l| crate::cmd_content::CmdLine {
                 line_num: l.line_num.to_usize(),
                 content: l.content.clone(),
+
+                expand_from_pool: None,
             })
             .collect();
         let raw = cmd_lines
@@ -469,6 +471,8 @@ mod tests {
                         diff_taps: 4,
                         content: "let inserted = 42;".to_string(),
                         is_raw: false,
+
+                        expand_from_pool: None,
                     }],
                 },
             },
@@ -540,6 +544,8 @@ mod tests {
                         diff_taps: 4,
                         content: "let x = 0;".to_string(),
                         is_raw: false,
+
+                        expand_from_pool: None,
                     }],
                 },
             },
@@ -551,6 +557,8 @@ mod tests {
                         diff_taps: 4,
                         content: "let y = 0;".to_string(),
                         is_raw: false,
+
+                        expand_from_pool: None,
                     }],
                 },
             },

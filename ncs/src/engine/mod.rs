@@ -150,7 +150,7 @@ impl Engine {
                         .take()
                         .map(|r| r.content)
                         .unwrap_or_else(CmdContent::empty);
-                    let internal = command.convert(input)?;
+                    let internal = command.convert(input, &self.pools)?;
 
                     // 3. execute_core: 核心操作
                     let result = command.execute_core(self, internal, registry)?;
@@ -176,7 +176,11 @@ impl Engine {
 
                     // 8. 加入 exec_cmds
                     let cmd_name = other.cmd_name();
-                    if cmd_name != "RAW" && cmd_name != "CAPTURE" && cmd_name != "GET" {
+                    if cmd_name != "RAW"
+                        && cmd_name != "CAPTURE"
+                        && cmd_name != "GET"
+                        && cmd_name != "LIKE"
+                    {
                         self.exec_cmds.push(ExecutedCommand {
                             cmd_name,
                             mode_name: other.mode_name(),
@@ -866,6 +870,8 @@ mod tests {
                         diff_taps: 4,
                         content: "let y = 2;".to_string(),
                         is_raw: false,
+
+                        expand_from_pool: None,
                     }],
                 },
             },
@@ -1001,6 +1007,8 @@ mod tests {
                         diff_taps: 4,
                         content: "let y = 2;".to_string(),
                         is_raw: false,
+
+                        expand_from_pool: None,
                     }],
                 },
             },
@@ -1124,6 +1132,8 @@ mod tests {
                         diff_taps: 4,
                         content: "let inserted = 42;".to_string(),
                         is_raw: false,
+
+                        expand_from_pool: None,
                     }],
                 },
             },
@@ -1198,6 +1208,8 @@ mod tests {
                         diff_taps: 4,
                         content: "let y = 2;".to_string(),
                         is_raw: false,
+
+                        expand_from_pool: None,
                     }],
                 },
             },
@@ -1259,7 +1271,6 @@ mod tests {
 
         let commands = vec![Command::Get {
             pool_name: "test_pool".to_string(),
-            like: None,
         }];
 
         let result = engine.execute(commands, &mut registry);

@@ -89,6 +89,7 @@ fn execute_normal(path: &Path, args: &HashMap<String, String>) -> Result<CmdCont
         result_lines.push(CmdLine {
             line_num,
             content: display,
+            expand_from_pool: None,
         });
         raw_parts.push(&line.content);
     }
@@ -127,6 +128,7 @@ fn execute_dir(path: &Path, args: &HashMap<String, String>) -> Result<CmdContent
     result_lines.push(CmdLine {
         line_num: 0,
         content: format!("{}:", root_name.blue().bold()),
+        expand_from_pool: None,
     });
 
     build_dir_tree(
@@ -192,6 +194,7 @@ fn build_dir_tree(
         lines.push(CmdLine {
             line_num: line_num_base + i + 1,
             content: display,
+            expand_from_pool: None,
         });
 
         if is_dir {

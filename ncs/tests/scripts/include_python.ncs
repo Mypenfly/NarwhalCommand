@@ -1,0 +1,13 @@
+// ============================================================
+// Test: include_python.ncs
+// Purpose: External Python command via Include.
+//   - Register python_echo.py as external command
+//   - Call it with arguments via Bash
+// ============================================================
+
+// -- Step 1: Register echo tool as external command --
+// exec=default uses the script's shebang (#!/usr/bin/env python3)
+!@Include ./tests/data/python_echo.py alias=echop
+
+// -- Step 2: Call the external echo tool with arguments --
+!@echop Hello from NCS via Include Python!

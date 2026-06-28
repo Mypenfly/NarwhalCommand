@@ -721,11 +721,15 @@ mod tests {
                     diff_taps: 0,
                     content: "let x = 1;".to_string(),
                     is_raw: false,
+
+                    expand_from_pool: None,
                 },
                 NewLine {
                     diff_taps: 4,
                     content: "let y = 2;".to_string(),
                     is_raw: false,
+
+                    expand_from_pool: None,
                 },
             ],
         };
@@ -745,6 +749,8 @@ mod tests {
                 diff_taps: 4,
                 content: "    raw_line".to_string(),
                 is_raw: true,
+
+                expand_from_pool: None,
             }],
         };
         let lines = build_new_lines(&content);
@@ -815,6 +821,8 @@ mod tests {
             .map(|(i, s)| CmdLine {
                 line_num: i + 1,
                 content: s.to_string(),
+
+                expand_from_pool: None,
             })
             .collect()
     }

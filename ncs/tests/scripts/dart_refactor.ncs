@@ -1,0 +1,60 @@
+// ============================================================
+// Test: dart_refactor.ncs
+// Purpose: Dart class refactoring using 2-space indent (Dart convention).
+//   - Add a logout() method after login()
+//   - Delete the validateSession() method
+// ============================================================
+
+// -- Step 1: Open the Dart auth file --
+!@Open ./tests/data/dart_auth.dart
+
+// -- Step 2: Insert logout() method after login() --
+// Note: uses 2-space indent to match Dart file convention
+!@Location
+  Future<AuthResult> refresh(String refreshToken) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/auth/refresh'),
+      body: {'refresh_token': refreshToken},
+    );
+    if (response.statusCode != 200) {
+      throw AuthException('Refresh failed');
+    }
+    final data = jsonDecode(response.body);
+    return AuthResult(
+      token: data['access_token'],
+      refreshToken: data['refresh_token'],
+      expiresAt: DateTime.now().add(
+        Duration(seconds: data['expires_in']),
+      ),
+    );
+  }
+!@New
+  Future<void> logout(String token) async {
+    await _client.post(
+      Uri.parse('$baseUrl/auth/logout'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+  }
+@/Location
+
+// -- Step 3: Delete validateSession() method --
+!@Location
+  Future<bool> validateSession(String token) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/auth/validate'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    return response.statusCode == 200;
+  }
+!@Delete
+  Future<bool> validateSession(String token) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl/auth/validate'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    return response.statusCode == 200;
+  }
+@/Location
+
+// -- Close and save --
+@/Open

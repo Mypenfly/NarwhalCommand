@@ -12,6 +12,7 @@ pub mod delete;
 pub mod exec;
 pub mod get;
 pub mod include;
+pub mod like;
 pub mod location;
 pub mod new;
 pub mod open;

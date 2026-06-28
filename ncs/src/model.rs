@@ -245,6 +245,8 @@ pub struct NewLine {
     pub content: String,
     /// 是否为 Raw 命令指定的字面量（此时 diff_taps 被忽略）
     pub is_raw: bool,
+    /// 若此行来自 !@Get pool_name，记录 pool 名称供后续展开
+    pub expand_from_pool: Option<String>,
 }
 
 /// New 命令后提取的新增内容
@@ -751,6 +753,7 @@ mod tests {
             diff_taps: 4,
             content: "let x = 1;".to_string(),
             is_raw: false,
+            expand_from_pool: None,
         };
         assert_eq!(new_line.diff_taps, 4);
         assert_eq!(new_line.content, "let x = 1;");
@@ -763,6 +766,7 @@ mod tests {
             diff_taps: 0,
             content: "...".to_string(),
             is_raw: true,
+            expand_from_pool: None,
         };
         assert!(new_line.is_raw);
     }
